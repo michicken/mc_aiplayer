@@ -82,10 +82,8 @@ public final class KnowledgeBase {
             case DEATH -> dirty = distillDeath(k, event, all);
             case RESOURCE_FOUND -> dirty = distillResource(k, event);
             case GOAL_FAILED -> {
-                LessonInput input = lessonInput(event.detail());
-                Lesson old = k.lessons.get(input.key());
-                k.lessons.put(input.key(), new Lesson(input.key(), input.reason(),
-                        old == null ? 1 : old.count() + 1, event.gameTick()));
+                Lesson next = nextLesson(event.detail(), k.lessons.get(lessonInput(event.detail()).key()), event.gameTick());
+                k.lessons.put(next.key(), next);
                 dirty = true;
             }
             case GOAL_DONE -> dirty = k.lessons.remove(event.detail()) != null; // 后来成功了 → 教训销账
@@ -228,6 +226,12 @@ public final class KnowledgeBase {
         String key = value.substring(0, separator).trim();
         String reason = value.substring(separator + 1).trim();
         return new LessonInput(key, reason);
+    }
+
+    /** 纯函数，既供蒸馏使用也供回归测试覆盖旧/新失败事件格式。 */
+    static Lesson nextLesson(String detail, Lesson previous, long tick) {
+        LessonInput input = lessonInput(detail);
+        return new Lesson(input.key(), input.reason(), previous == null ? 1 : previous.count() + 1, tick);
     }
 
     // ==================== 落盘 ====================
