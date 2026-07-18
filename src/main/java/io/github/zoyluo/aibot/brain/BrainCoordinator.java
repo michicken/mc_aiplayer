@@ -468,7 +468,7 @@ public final class BrainCoordinator {
      * The model is kept unchanged, so remove only presentation-only assistant habits at the TTS
      * boundary. This deliberately never invents words or rewrites an instruction/result.
      */
-    private static String polishSpeech(String raw) {
+    static String polishSpeech(String raw) {
         if (raw == null) {
             return "";
         }
@@ -490,6 +490,15 @@ public final class BrainCoordinator {
     }
 
     private static String shortenSpeech(String text, int maximum) {
+        // speak is explicitly one livestream sentence. Cut after the first completed sentence
+        // even when it happens to fit the hard character limit, otherwise two concise sentences
+        // still sound like a prepared assistant monologue.
+        for (int index = 8; index < text.length(); index++) {
+            char character = text.charAt(index);
+            if (character == '。' || character == '！' || character == '？' || character == '!' || character == '?') {
+                return text.substring(0, index + 1);
+            }
+        }
         if (text.length() <= maximum) {
             return text;
         }
