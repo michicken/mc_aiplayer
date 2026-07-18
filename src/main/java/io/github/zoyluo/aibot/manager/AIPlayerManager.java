@@ -440,7 +440,21 @@ public final class AIPlayerManager {
         if (Standability.isStandable(world, requestedBlock)) {
             return requested;
         }
-        Optional<BlockPos> safe = Standability.findNearestStandable(world, requestedBlock, 8, 128, 32);
+        // 出生点修正绝不能复用寻路的深层搜索半径。普通寻路可以为目标找 128 格下的可走格，
+        // 但出生时这么做会把高处/未加载地形旁的 bot 直接塞进脚下深洞，甚至在死亡点附近反复送命。
+        // 先只在当前高度附近找可靠脚点；找不到才明确回到同列地表。
+        Optional<BlockPos> safe = Standability.findNearestStandable(world, requestedBlock, 8, 8, 16);
+        String correction = "nearby";
+        if (safe.isEmpty()) {
+            BlockPos surface = world.getTopPosition(Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, requestedBlock);
+            safe = Standability.findNearestStandable(world, surface, 8, 16, 8);
+            correction = "surface";
+        }
+        if (safe.isEmpty()) {
+            BlockPos spawn = world.getSpawnPos();
+            safe = Standability.findNearestStandable(world, spawn, 16, 16, 16);
+            correction = "world_spawn";
+        }
         if (safe.isEmpty()) {
             BotLog.warn(io.github.zoyluo.aibot.log.LogCategory.LIFECYCLE, null, "bot_spawn_position_unsafe",
                     "name", name, "requested", LogFields.pos(requestedBlock));
@@ -449,7 +463,8 @@ public final class AIPlayerManager {
         BotLog.warn(io.github.zoyluo.aibot.log.LogCategory.LIFECYCLE, null, "bot_spawn_position_snapped",
                 "name", name,
                 "from", LogFields.pos(requestedBlock),
-                "to", LogFields.pos(safe.get()));
+                "to", LogFields.pos(safe.get()),
+                "strategy", correction);
         return Vec3d.ofBottomCenter(safe.get());
     }
 
