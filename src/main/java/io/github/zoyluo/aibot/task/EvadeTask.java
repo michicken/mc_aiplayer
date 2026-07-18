@@ -1,6 +1,7 @@
 package io.github.zoyluo.aibot.task;
 
 import io.github.zoyluo.aibot.entity.AIPlayerEntity;
+import io.github.zoyluo.aibot.pathfinding.Standability;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
 
@@ -72,12 +73,8 @@ public final class EvadeTask extends AbstractTask {
     }
 
     private BlockPos chooseGoal(AIPlayerEntity bot) {
-        Vec3d away = new Vec3d(1.0D, 0.0D, 0.0D);
-        if (threat.entity() != null) {
-            away = bot.getPos().subtract(threat.entity().getPos());
-        } else if (threat.pos() != null) {
-            away = bot.getPos().subtract(Vec3d.ofCenter(threat.pos()));
-        }
+        Vec3d threatPos = threatPosition();
+        Vec3d away = bot.getPos().subtract(threatPos);
         if (away.lengthSquared() < 0.01D) {
             away = new Vec3d(1.0D, 0.0D, 0.0D);
         }
@@ -85,17 +82,64 @@ public final class EvadeTask extends AbstractTask {
         // 反复被蹭血磨死。20 格出圈,一次逃干净。
         away = away.normalize().multiply(20.0D);
         BlockPos base = BlockPos.ofFloored(bot.getPos().add(away));
-        for (int radius = 0; radius <= 4; radius++) {
-            for (BlockPos candidate : BlockPos.iterate(base.add(-radius, -2, -radius), base.add(radius, 2, radius))) {
-                if (io.github.zoyluo.aibot.pathfinding.Standability.isStandable(bot.getServerWorld(), candidate)) {
-                    return candidate.toImmutable();
+        BlockPos direct = bestEscapeNear(bot, base, threatPos, 4, 0.0D);
+        if (direct != null) {
+            return direct;
+        }
+
+        // 矿洞里“离怪 20 格”的目标常正好落在实心岩壁。旧实现直接失败，DangerWatcher 下次扫描
+        // 又派同一个 EvadeTask，形成 no_valid_escape_route 刷屏。退一步：在脚下周围找一条能实质
+        // 拉开距离的安全通道，哪怕只能先撤 4~8 格，也比站在原地等下一次扫描更像真人逃跑。
+        double currentDistance = horizontalDistance(bot.getPos(), threatPos);
+        return bestEscapeNear(bot, bot.getBlockPos(), threatPos, 8, currentDistance + 1.5D);
+    }
+
+    private Vec3d threatPosition() {
+        if (threat.entity() != null) {
+            return threat.entity().getPos();
+        }
+        if (threat.pos() != null) {
+            return Vec3d.ofCenter(threat.pos());
+        }
+        return Vec3d.ZERO;
+    }
+
+    private static BlockPos bestEscapeNear(AIPlayerEntity bot,
+                                           BlockPos center,
+                                           Vec3d threatPos,
+                                           int radiusLimit,
+                                           double minimumThreatDistance) {
+        BlockPos best = null;
+        double bestScore = Double.NEGATIVE_INFINITY;
+        Vec3d botPos = bot.getPos();
+        for (int radius = 0; radius <= radiusLimit; radius++) {
+            for (BlockPos candidate : BlockPos.iterate(
+                    center.add(-radius, -2, -radius), center.add(radius, 2, radius))) {
+                if (Math.max(Math.abs(candidate.getX() - center.getX()), Math.abs(candidate.getZ() - center.getZ())) != radius
+                        || !Standability.isStandable(bot.getServerWorld(), candidate)) {
+                    continue;
+                }
+                Vec3d candidatePos = Vec3d.ofCenter(candidate);
+                double threatDistance = horizontalDistance(candidatePos, threatPos);
+                double travelDistance = horizontalDistance(candidatePos, botPos);
+                if (travelDistance < 3.0D || threatDistance < minimumThreatDistance) {
+                    continue;
+                }
+                // Prefer getting farther from danger, then prefer a short reachable first leg.
+                double score = threatDistance * 4.0D - travelDistance * 0.15D;
+                if (score > bestScore) {
+                    best = candidate.toImmutable();
+                    bestScore = score;
                 }
             }
         }
-        // 逃向方向 20+4 格内无可站点(深处隧道四周全实心/被围)→ 返回 null 表"无处可逃",
-        // 由 onTick 干净 fail 交 DangerWatcher 升级筑墙。绝不返回当前位置(旧 bug:距离=0 → 立即假完成 →
-        // DangerWatcher 见威胁仍在又派 evade → 原地反复假逃被磨死,real_diamond 深层挖矿送命主因)。
-        return null;
+        return best;
+    }
+
+    private static double horizontalDistance(Vec3d first, Vec3d second) {
+        double x = first.x - second.x;
+        double z = first.z - second.z;
+        return Math.sqrt(x * x + z * z);
     }
 
     private static String compact(BlockPos pos) {
