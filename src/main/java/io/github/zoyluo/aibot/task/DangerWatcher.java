@@ -9,8 +9,10 @@ import io.github.zoyluo.aibot.log.BotLog;
 import io.github.zoyluo.aibot.manager.AIPlayerManager;
 import net.minecraft.block.BlockState;
 import net.minecraft.entity.LivingEntity;
+import net.minecraft.entity.mob.Angerable;
 import net.minecraft.entity.mob.CreeperEntity;
 import net.minecraft.entity.mob.HostileEntity;
+import net.minecraft.entity.mob.SpiderEntity;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.registry.tag.FluidTags;
@@ -567,7 +569,7 @@ public final class DangerWatcher {
                         entity -> entity instanceof HostileEntity && entity.isAlive());
         hostiles.sort(Comparator.comparingDouble(bot::distanceTo));
         for (LivingEntity mob : hostiles) {
-            if (!canReachThreat(bot, mob)) {
+            if (!hasHostileIntent(bot, mob) || !canReachThreat(bot, mob)) {
                 continue; // 被方块阻隔,够不到 bot → 不算威胁
             }
             Threat.Severity severity = mob instanceof CreeperEntity
@@ -600,6 +602,24 @@ public final class DangerWatcher {
         return CombatCore.hasLineOfSight(bot, mob);
     }
 
+    /**
+     * HostileEntity 是分类，不等于此刻正在威胁玩家。白天平静的蜘蛛、未被激怒的末影人/僵尸猪灵
+     * 不应让长距离任务反复掉头；一旦它们锁定 bot 或进入实际愤怒状态，仍按正常威胁处理。
+     */
+    private static boolean hasHostileIntent(AIPlayerEntity bot, LivingEntity mob) {
+        LivingEntity target = mob instanceof net.minecraft.entity.mob.MobEntity entity ? entity.getTarget() : null;
+        if (target == bot) {
+            return true;
+        }
+        if (mob instanceof SpiderEntity && mob.getBrightnessAtEyes() >= 0.5F) {
+            return false;
+        }
+        if (mob instanceof Angerable angerable) {
+            return angerable.shouldAngerAt(bot, bot.getServerWorld());
+        }
+        return true;
+    }
+
     // 近处(8 格)是否有可达(有视线)的敌对怪。用于濒死封墙闸在 LOW_HP 抢占下补判——血<6 时 collectTopThreat
     // 已把 top 改写成 LOW_HP/entity=null,丢了 hostile 信息,这里独立扫一次还原"是否真被怪围"。复用同款视线判定。
     private static boolean hasReachableHostile(AIPlayerEntity bot) {
@@ -607,7 +627,7 @@ public final class DangerWatcher {
                 .getEntitiesByClass(LivingEntity.class, bot.getBoundingBox().expand(8.0D),
                         entity -> entity instanceof HostileEntity && entity.isAlive());
         for (LivingEntity mob : hostiles) {
-            if (canReachThreat(bot, mob)) {
+            if (hasHostileIntent(bot, mob) && canReachThreat(bot, mob)) {
                 return true;
             }
         }
