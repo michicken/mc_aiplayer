@@ -485,7 +485,9 @@ public final class DangerWatcher {
 
     // combat 困死检测:连续 ≥2 次 combat 被 StuckWatcher 中止(stuck:combat),说明目标够不到 → 改逃,别站桩被打死。
     private boolean combatStuck(AIPlayerEntity bot) {
-        Optional<TaskManager.FailureRecord> fail = TaskManager.INSTANCE.peekFailure(bot);
+        // pendingFailure 会在 BrainCoordinator 注入失败提示时被消费。这里是生存层的确定性决策，
+        // 必须读保留的 lastFailure，否则大脑一醒来就忘掉连续卡死，又会派回同一种 combat。
+        Optional<TaskManager.FailureRecord> fail = TaskManager.INSTANCE.lastFailure(bot);
         return fail.isPresent()
                 && "combat".equals(fail.get().name())
                 && fail.get().reason().contains("stuck")
