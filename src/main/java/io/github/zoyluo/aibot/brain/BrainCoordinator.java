@@ -908,7 +908,7 @@ public final class BrainCoordinator {
                 .map(failure -> {
                     int maxRetries = AIBotConfig.get().brain().maxTaskRetries();
                     String retryHint = failure.count() >= maxRetries
-                            ? " 已经连续多次同样失败,请倾向于换方法或用 say 说明无法完成。"
+                            ? " 已经连续多次同样失败,请倾向于换方法或用 speak 说明无法完成后 finish。"
                             : "";
                     String strategyHint = failure.count() >= 2
                             ? " 同一任务和原因已经连续失败,禁止原样重试;必须换工具/任务策略,或先补齐前置条件。"
@@ -922,7 +922,7 @@ public final class BrainCoordinator {
                             + failure.reason()
                             + "(第"
                             + failure.count()
-                            + "次)。请判断:补齐前置条件后重试 / 换用其它方法 / 用 say 说明无法完成。"
+                            + "次)。请判断:补齐前置条件后重试 / 换用其它方法 / 用 speak 说明无法完成后 finish。"
                             + retryHint
                             + strategyHint
                             + executableHint
@@ -942,6 +942,15 @@ public final class BrainCoordinator {
         String reason = failure.reason() == null ? "" : failure.reason();
         if (reason.startsWith("no_exposed_ore")) {
             return " 可执行建议:目标是矿石但附近没有暴露矿块,不要再用 mine;改用 mine_ore(ore=目标矿石),它会自动备镐并深入找矿。";
+        }
+        if (reason.startsWith("move_no_safe_route") || reason.startsWith("move_water_path_timeout")) {
+            return " 可执行建议:导航已尝试绕行但没有安全路线。禁止原样重复移动命令或手动挖路；"
+                    + "若目标是主人,用 speak 简短说明被地形隔开后 finish 并等待主人靠近；"
+                    + "若目标是地点,先 scan_surroundings 判断附近是否有安全入口，再决定是否请主人重新标记位置。";
+        }
+        if (reason.startsWith("stuck:move")) {
+            return " 可执行建议:移动卡住了。先不要重复同一坐标；用 scan_surroundings 看阻挡，"
+                    + "能判断安全入口再重试，否则 speak 说明卡在哪里后 finish。";
         }
         return "";
     }

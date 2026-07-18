@@ -99,7 +99,9 @@ public record AIBotConfig(
                 // max_tokens=768: 直播短句足够,且 Step reasoning 吃 token 预算,留余量给正文。
                 new DeepSeek("", "https://api.stepfun.com/step_plan", LIVE_AGENT_MODEL, 768, 0.3D, 60, 3, 500, false),
                 new Perception(16, 20, 10, 10, false),
-                new Brain(36, 6, 12, false, true, false, 3, true, false, true), // maxTurns 24→12(早止损);advancedTools 默认藏;ownerEventPush 默认开
+                // 任务进度仍在 HUD 和状态面板可见；默认不把每个 25% 的机械播报塞进聊天流，
+                // 让模型只在真正有话要说或需要解释失败时开口。
+                new Brain(36, 6, 12, false, true, false, 3, false, false, true),
                 new Watchdog(120), // 200t(10s)发呆才判卡太钝,120t(6s)更快触发恢复(实例 config 里的旧值 200 部署时须同步改)
                 new Logging(true, "logs/aibot", true, "daily", 50, 30, true, Map.of(
                         "LIFECYCLE", "INFO",
