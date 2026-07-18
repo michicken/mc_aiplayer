@@ -37,6 +37,7 @@ public final class ReasonText {
             Map.entry("partial_stockpile_container_full", "已经存了一部分,但基地箱子装不下剩余物品。"),
             Map.entry("stockpile_timeout", "归仓时间太久了,我先停下来重新判断。"),
             Map.entry("no_supply", "基地没有可用补给,材料也不够现造。"),
+            Map.entry("no_food_supply", "附近没有能拿到的食物，也没有足够小麦做面包。"),
             Map.entry("no_food", "背包里没有可吃的食物。"),
             Map.entry("resupply_timeout", "补给时间太久了,我先停下来重新判断。"),
             Map.entry("out_of_fuel", "燃料不够,背包和基地箱子里都没找到可用燃料。")

@@ -29,6 +29,7 @@ public final class DangerWatcher {
     private final Map<UUID, Integer> nextThreatAttemptTick = new ConcurrentHashMap<>();
     private final Map<UUID, Integer> nextEatAttemptTick = new ConcurrentHashMap<>();
     private final Map<UUID, Integer> nextResupplyAttemptTick = new ConcurrentHashMap<>();
+    private final Map<UUID, ResupplyFailure> observedResupplyFailures = new ConcurrentHashMap<>();
     private final Map<UUID, Integer> nextNightAttemptTick = new ConcurrentHashMap<>();
     private final Map<UUID, Integer> observedSleepCompletionTicks = new ConcurrentHashMap<>();
     private final Map<UUID, TrapRecord> trapRecords = new ConcurrentHashMap<>();
@@ -52,6 +53,9 @@ public final class DangerWatcher {
     }
 
     private record PosRecord(BlockPos pos, int sinceTick) {
+    }
+
+    private record ResupplyFailure(int tick, String reason) {
     }
 
     public void scanAll(MinecraftServer server) {
@@ -167,6 +171,23 @@ public final class DangerWatcher {
         int now = server.getTicks();
         if (now < nextResupplyAttemptTick.getOrDefault(bot.getUuid(), 0)) {
             return false;
+        }
+        // A failed food resupply used to win priority again every ten seconds, so maybeEat never
+        // reached its hunt-for-food branch. Back off once per concrete failure and let the next
+        // scan look for animals instead; a later retry remains possible after the cooldown.
+        Optional<TaskManager.FailureRecord> latestFailure = TaskManager.INSTANCE.lastFailure(bot);
+        if (latestFailure.isPresent()
+                && "resupply".equals(latestFailure.get().name())
+                && latestFailure.get().reason().startsWith("no_food_supply")) {
+            ResupplyFailure currentFailure = new ResupplyFailure(latestFailure.get().tick(), latestFailure.get().reason());
+            ResupplyFailure previousFailure = observedResupplyFailures.put(bot.getUuid(), currentFailure);
+            if (!currentFailure.equals(previousFailure)) {
+                nextResupplyAttemptTick.put(bot.getUuid(), now + 600);
+                BotLog.danger(bot, "resupply_food_source_missing", "cooldown_ticks", 600);
+                return false;
+            }
+        } else {
+            observedResupplyFailures.remove(bot.getUuid());
         }
 
         ResupplyTask task = null;

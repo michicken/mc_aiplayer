@@ -270,6 +270,13 @@ public final class ResupplyTask extends AbstractTask {
     }
 
     private void startCrafting(AIPlayerEntity bot) {
+        if (need == Need.FOOD && InventoryAction.countItem(bot, Items.WHEAT) < 3) {
+            // Do not pretend that bread is the universal food fallback. In the wild this used to
+            // fail with "need wheat" every few seconds and prevented DangerWatcher from trying
+            // nearby prey. A missing food source is useful information for the next decision.
+            fail("no_food_supply");
+            return;
+        }
         Item craftTarget = need == Need.FOOD ? Items.BREAD : requestedItem;
         if (craftTarget == null) {
             fail("no_supply");

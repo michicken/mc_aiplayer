@@ -220,6 +220,11 @@ public final class TaskManager {
         return Optional.ofNullable(pendingFailure.get(bot.getUuid()));
     }
 
+    /** Latest failure remains available after the brain consumes its one-shot wake-up record. */
+    public Optional<FailureRecord> lastFailure(AIPlayerEntity bot) {
+        return Optional.ofNullable(lastFailure.get(bot.getUuid()));
+    }
+
     public Optional<FailureRecord> consumeFailure(AIPlayerEntity bot) {
         return Optional.ofNullable(pendingFailure.remove(bot.getUuid()));
     }
