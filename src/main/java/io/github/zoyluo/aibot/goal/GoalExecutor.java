@@ -91,10 +91,14 @@ public final class GoalExecutor {
             BotLog.warn(io.github.zoyluo.aibot.log.LogCategory.TASK, bot, "goal_plan_failed",
                     "goal", goal,
                     "unresolved", plan.unresolved());
+            recordGoalFailure(bot, goal, "planning_failed:" + String.join(",", plan.unresolved()));
             return false;
         }
         if (plan.steps().isEmpty()) {
             activePlans.remove(bot.getUuid());
+            // 已满足也算目标成功:清掉此前同目标的持久失败经验，避免模型被过期教训误导。
+            io.github.zoyluo.aibot.memory.EpisodeLog.INSTANCE.record(bot,
+                    io.github.zoyluo.aibot.memory.EpisodeLog.Type.GOAL_DONE, bot.getBlockPos(), goalLabel(goal));
             report(bot, "目标已经满足。");
             return true;
         }
@@ -357,8 +361,7 @@ public final class GoalExecutor {
             activePlans.remove(bot.getUuid());
             lastGoalFailTick.put(bot.getUuid(), server.getTicks());
             BotLog.warn(io.github.zoyluo.aibot.log.LogCategory.TASK, bot, "goal_failed", "goal", plan.goal, "reason", reason);
-            io.github.zoyluo.aibot.memory.EpisodeLog.INSTANCE.record(bot,
-                    io.github.zoyluo.aibot.memory.EpisodeLog.Type.GOAL_FAILED, bot.getBlockPos(), goalLabel(plan.goal));
+            recordGoalFailure(bot, plan.goal, reason);
             report(bot, humanGoalFailure(reason));
             userGoal.remove(bot.getUuid());
             advanceQueue(bot); // 像真人:这件办不成说一声,接着办队列里的下一件
@@ -379,6 +382,7 @@ public final class GoalExecutor {
             lastGoalFailTick.put(bot.getUuid(), server.getTicks());
             BotLog.warn(io.github.zoyluo.aibot.log.LogCategory.TASK, bot, "goal_failed",
                     "goal", plan.goal, "reason", "replan_same_step:" + reason);
+            recordGoalFailure(bot, plan.goal, "replan_same_step:" + reason);
             report(bot, humanGoalFailure(reason));
             userGoal.remove(bot.getUuid());
             advanceQueue(bot);
@@ -474,6 +478,16 @@ public final class GoalExecutor {
 
     private static void report(AIPlayerEntity bot, String text) {
         BotReporter.INSTANCE.onGoalMessage(bot, text);
+    }
+
+    private static void recordGoalFailure(AIPlayerEntity bot, Goal goal, String reason) {
+        String cleanReason = reason == null ? "unknown" : reason.replace('\t', ' ').replace('\n', ' ').trim();
+        if (cleanReason.length() > 160) {
+            cleanReason = cleanReason.substring(0, 157) + "...";
+        }
+        io.github.zoyluo.aibot.memory.EpisodeLog.INSTANCE.record(bot,
+                io.github.zoyluo.aibot.memory.EpisodeLog.Type.GOAL_FAILED, bot.getBlockPos(),
+                goalLabel(goal) + "\t" + cleanReason);
     }
 
     // 硬卡死类失败:原样重试只会再失败(挖不动/卡住/超时/够不到)。区别于"缺料/缺镐"这类重规划能补的。

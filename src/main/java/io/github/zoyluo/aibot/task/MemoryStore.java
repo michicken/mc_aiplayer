@@ -26,7 +26,7 @@ public final class MemoryStore {
         if ("system".equals(first.role())) {
             compact.add(first);
         }
-        String memory = BotMemoryStore.INSTANCE.of(bot.getUuid()).inject();
+        String memory = persistentContext(bot);
         if (!memory.isBlank()) {
             compact.add(ChatMessage.system("Persistent memory:\n" + memory));
         }
@@ -80,7 +80,7 @@ public final class MemoryStore {
     }
 
     private List<ChatMessage> injectPersistentMemory(AIPlayerEntity bot, List<ChatMessage> rawHistory) {
-        String memory = BotMemoryStore.INSTANCE.of(bot.getUuid()).inject();
+        String memory = persistentContext(bot);
         if (memory.isBlank()) {
             return rawHistory;
         }
@@ -94,5 +94,27 @@ public final class MemoryStore {
             result.addAll(rawHistory);
         }
         return result;
+    }
+
+    private static String persistentContext(AIPlayerEntity bot) {
+        String memory = BotMemoryStore.INSTANCE.of(bot.getUuid()).inject();
+        List<io.github.zoyluo.aibot.memory.KnowledgeBase.Lesson> lessons =
+                io.github.zoyluo.aibot.memory.KnowledgeBase.INSTANCE.repeatedLessons(bot.getUuid(), 2);
+        if (lessons.isEmpty()) {
+            return memory;
+        }
+        StringBuilder context = new StringBuilder(memory);
+        if (!context.isEmpty()) {
+            context.append("\n");
+        }
+        context.append("Repeated failed goals (do not repeat the same method):\n");
+        for (io.github.zoyluo.aibot.memory.KnowledgeBase.Lesson lesson : lessons) {
+            context.append("- ").append(lesson.key());
+            if (!lesson.reason().isBlank()) {
+                context.append(": ").append(lesson.reason());
+            }
+            context.append(" (failed ").append(lesson.count()).append(" times)\n");
+        }
+        return context.toString().trim();
     }
 }

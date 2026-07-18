@@ -52,6 +52,9 @@ public final class KnowledgeBase {
     public record Lesson(String key, String reason, int count, long lastTick) {
     }
 
+    private record LessonInput(String key, String reason) {
+    }
+
     static final class BotKnowledge {
         List<ResourcePoint> resources = new ArrayList<>();
         List<DangerZone> dangers = new ArrayList<>();
@@ -79,9 +82,10 @@ public final class KnowledgeBase {
             case DEATH -> dirty = distillDeath(k, event, all);
             case RESOURCE_FOUND -> dirty = distillResource(k, event);
             case GOAL_FAILED -> {
-                Lesson old = k.lessons.get(event.detail());
-                k.lessons.put(event.detail(), new Lesson(event.detail(),
-                        event.detail(), old == null ? 1 : old.count() + 1, event.gameTick()));
+                LessonInput input = lessonInput(event.detail());
+                Lesson old = k.lessons.get(input.key());
+                k.lessons.put(input.key(), new Lesson(input.key(), input.reason(),
+                        old == null ? 1 : old.count() + 1, event.gameTick()));
                 dirty = true;
             }
             case GOAL_DONE -> dirty = k.lessons.remove(event.detail()) != null; // 后来成功了 → 教训销账
@@ -173,6 +177,22 @@ public final class KnowledgeBase {
         return false;
     }
 
+    /**
+     * 只返回反复出现的失败。单次失败可能只是怪物、方块或玩家位置的偶发变化，不应塞进模型上下文；
+     * 同一高层目标连续失败两次以上才作为“换方法”的经验供下一轮决策使用。
+     */
+    public List<Lesson> repeatedLessons(UUID botId, int limit) {
+        int cappedLimit = Math.max(0, Math.min(limit, 4));
+        if (cappedLimit == 0) {
+            return List.of();
+        }
+        return of(botId).lessons.values().stream()
+                .filter(lesson -> lesson.count() >= 2)
+                .sorted(java.util.Comparator.comparingLong(Lesson::lastTick).reversed())
+                .limit(cappedLimit)
+                .toList();
+    }
+
     /** 测试隔离:清掉该 bot 的全部知识。套件互染实锤:前 9 个挖矿场景的资源点让 richZoneNear
      * 把 geo_rich 的富区导向拐去早挖空的废区(套跑 FAIL 单跑 PASS)。真实使用不走此口,知识照常持久。 */
     public void resetFor(UUID botId) {
@@ -196,6 +216,18 @@ public final class KnowledgeBase {
 
     public int dangerCount(UUID botId) {
         return of(botId).dangers.size();
+    }
+
+    private static LessonInput lessonInput(String detail) {
+        String value = detail == null ? "" : detail;
+        int separator = value.indexOf('\t');
+        if (separator < 0) {
+            // 兼容旧存档/旧 EpisodeLog:此前 detail 就是目标标题，没有失败原因。
+            return new LessonInput(value, "");
+        }
+        String key = value.substring(0, separator).trim();
+        String reason = value.substring(separator + 1).trim();
+        return new LessonInput(key, reason);
     }
 
     // ==================== 落盘 ====================
