@@ -106,6 +106,7 @@ public final class BrainCoordinator {
         conversation.turnsInCurrentRequest = 0;
         conversation.continuationTaskPolls = 0;
         conversation.maxTurnsHintInjected = false;
+        conversation.finishRecoveryAttempted = false;
         if (!preservesRunningWork) {
             io.github.zoyluo.aibot.goal.GoalExecutor.INSTANCE.clearUserGoal(bot);
         }
@@ -158,6 +159,7 @@ public final class BrainCoordinator {
                 if ("finish".equals(result.name())) {
                     finishCalled = true;
                     conversation.uncommittedTools = 0;
+                    conversation.finishRecoveryAttempted = false;
                     if (result.content() != null) {
                         try {
                             com.google.gson.JsonObject o = com.google.gson.JsonParser.parseString(result.content()).getAsJsonObject();
@@ -220,20 +222,24 @@ public final class BrainCoordinator {
             return;
         }
 
-        // === 工具链完成但模型没调 finish → 注入 system 提示进 history,让下一轮 API 调用时模型能看到 ===
-        // finish 是玩家发下一条消息的唯一闸门。模型做完工具链直接 stop 而不 finish → 玩家被卡住。
-        // 我们不清空 history(那样会丢失工具结果上下文),而是追加一条 system 消息提醒模型"请调用 finish"。
-        if (conversation.uncommittedTools > 0 && !"tool_calls".equals(response.finishReason())) {
-            BotLog.comm(bot, "turn_auto_closed_missing_finish", "uncommitted", conversation.uncommittedTools, "finish_reason", response.finishReason());
-            trace(bot, "! 本轮因未调 finish 自动结束 → 注入提示进 history");
+        // Step 偶尔在工具结果后直接 stop。旧逻辑只把提醒塞进历史后就结束请求，提醒永远不会
+        // 被看见，直播里表现为 bot 做了动作却没有自然收尾。补发一次仅用于收尾的请求；若模型仍
+        // 不调用 finish 则让本轮安静结束，避免无限自我对话。
+        if (conversation.uncommittedTools > 0 && !conversation.finishRecoveryAttempted) {
+            BotLog.comm(bot, "finish_recovery_submitted", "uncommitted", conversation.uncommittedTools, "finish_reason", response.finishReason());
+            trace(bot, "! 工具已执行但漏收尾，补一次 finish");
             String hint = "[系统提示] 上一轮你执行了 " + conversation.uncommittedTools
-                    + " 个工具(speak/gather/move_to 等)后直接结束了,但忘了调用 finish(summary=\"...\")。"
-                    + "玩家现在被卡住无法发新指令。下一轮请你先调用 finish(summary=\"一句话总结上一轮做了什么\") 解锁玩家,"
-                    + "然后再继续新任务。记住:每完成一步工具链后必须 finish!";
+                    + " 个工具后直接结束了,但没有调用 finish(summary=\"...\")。"
+                    + "现在只调用一次 finish，用一句自然短话收尾；不要再调用任何行动工具，也不要开始新任务。";
             conversation.history.add(ChatMessage.system(hint));
-            conversation.uncommittedTools = 0;
+            conversation.finishRecoveryAttempted = true;
+            trimHistory(conversation);
+            submit(bot, conversation);
+            return;
         } else if (conversation.uncommittedTools > 0) {
+            BotLog.comm(bot, "finish_recovery_exhausted", "uncommitted", conversation.uncommittedTools, "finish_reason", response.finishReason());
             conversation.uncommittedTools = 0;
+            conversation.finishRecoveryAttempted = false;
         }
 
         ReplayRecorder.INSTANCE.onDecision(bot, conversation.lastPerceptionDigest, List.of(), response.content());
@@ -1046,6 +1052,7 @@ public final class BrainCoordinator {
         private boolean fromOwner; // 当前请求是否由主人本人消息触发(run_command 代码级门禁)
         private long generation; // 打断代数:abort/接管时 ++,在途 API 回调与续航回调按排定时代数比对,不匹配即作废
         private int uncommittedTools; // 自上次 finish 以来已执行的工具数(防 Step 调完工具就停止的掉链子 fallback)
+        private boolean finishRecoveryAttempted; // 漏 finish 时只补一次收尾请求，避免模型无限自问自答
         private String finishSummary; // finish 工具提交的待发总结
         private boolean inFlight; // 一笔 API 请求真正在途(区别于任务运行期的续航等待间隙)
         private long continuationToken; // 续航排定序号:每次排定 ++,延迟回调按捕获值比对,被更新排定(任务完成抢跑)取代即作废
