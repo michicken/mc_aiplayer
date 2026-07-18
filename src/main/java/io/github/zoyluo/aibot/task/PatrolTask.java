@@ -82,11 +82,7 @@ public final class PatrolTask extends AbstractTask {
             return;
         }
         if (elapsed > MAX_ELAPSED) {
-            if (lapsDone > 0) {
-                complete();
-            } else {
-                fail("patrol_timeout");
-            }
+            fail("patrol_timeout laps=" + lapsDone + "/" + lapsWanted);
             return;
         }
         BlockPos target = corners[idx];
@@ -94,12 +90,17 @@ public final class PatrolTask extends AbstractTask {
         double dx = target.getX() - feet.getX();
         double dz = target.getZ() - feet.getZ();
         boolean arrived = dx * dx + dz * dz <= ARRIVE_DIST * ARRIVE_DIST;
-        if (arrived || elapsed - legStart > LEG_BUDGET) {
+        if (arrived) {
             idx = (idx + 1) % corners.length;
             if (idx == 0) {
                 lapsDone++;
             }
             legStart = elapsed;
+            return;
+        }
+        if (elapsed - legStart > LEG_BUDGET) {
+            bot.getActionPack().stopAll();
+            fail("patrol_leg_unreachable corner=" + idx + " laps=" + lapsDone + "/" + lapsWanted);
             return;
         }
         if (bot.getActionPack().isPathExecutorIdle()) {

@@ -19,8 +19,10 @@ import io.github.zoyluo.aibot.task.TaskStatus;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
+import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -56,6 +58,7 @@ public final class BrainCoordinator {
         BotConversation conversation = conversations.computeIfAbsent(bot.getUuid(), ignored -> new BotConversation());
         boolean fromOwner = isOwnerSender(bot, senderName);
         boolean preservesRunningWork = fromOwner && hasRunningWork(bot) && isStatusOrSocialMessage(text);
+        boolean preservesWorkEvidence = hasRunningWork(bot) && (!fromOwner || preservesRunningWork);
         // A new owner command must win immediately, but a question such as "挖到哪了？" or
         // a bit of livestream banter should not erase a mine/build/follow task that is working.
         if (fromOwner && !preservesRunningWork) {
@@ -95,11 +98,13 @@ public final class BrainCoordinator {
         }
         conversation.fromOwner = fromOwner;
         conversation.lastToolIntent = text;
-        conversation.actionDispatchedThisTurn = false;
-        conversation.taskDispatchedThisTurn = false;
+        conversation.currentMessagePreservesWork = preservesWorkEvidence;
+        if (!preservesWorkEvidence) {
+            resetExecutionEvidence(conversation, text);
+        }
         conversation.actionRecoveryAttempted = false;
         conversation.modelSpeechGate.reset();
-        if (!senderName.contains(":")) {
+        if (fromOwner && !preservesWorkEvidence) {
             // 真人消息(gift:/danmaku:/system: 都带冒号前缀,玩家名不含冒号)记为"最初的完整要求",
             // task_done_wake 时回灌——治复合指令"先A再B"里 B 靠被 trim 的历史回忆导致只做一半。
             conversation.lastUserRequest = trunc(text, 120);
@@ -112,7 +117,7 @@ public final class BrainCoordinator {
         conversation.continuationTaskPolls = 0;
         conversation.maxTurnsHintInjected = false;
         conversation.finishRecoveryAttempted = false;
-        if (!preservesRunningWork) {
+        if (fromOwner && !preservesRunningWork) {
             io.github.zoyluo.aibot.goal.GoalExecutor.INSTANCE.clearUserGoal(bot);
         }
         trace(bot, ">> [" + senderName + "] " + trunc(text, 60));
@@ -366,6 +371,7 @@ public final class BrainCoordinator {
         if (conversation == null) {
             return;
         }
+        settleExecutionEvidence(bot, conversation);
         // A completed/failed task is a real state transition, so a final report may speak even if
         // the same request already voiced a short acknowledgement before dispatching the task.
         conversation.modelSpeechGate.reset();
@@ -404,6 +410,11 @@ public final class BrainCoordinator {
         conversation.turnsInCurrentRequest = 0;
         conversation.continuationTaskPolls = 0;
         conversation.maxTurnsHintInjected = false;
+        if (!conversation.executionRequest.isBlank()) {
+            conversation.fromOwner = conversation.executionFromOwner;
+            conversation.lastToolIntent = conversation.executionRequest;
+        }
+        conversation.currentMessagePreservesWork = false;
         if (hasFailure && maybeInjectFailure(bot, conversation)) {
             awaitingTask.remove(bot.getUuid());
             trimHistory(conversation);
@@ -540,10 +551,15 @@ public final class BrainCoordinator {
         FactualityGate.FinishDecision decision = FactualityGate.reviewFinish(
                 factualityContext(bot, conversation), summary);
         if (!decision.allowed()) {
-            BotLog.comm(bot, "finish_rejected_no_action",
+            String event = decision.reason().startsWith("rejected_incomplete")
+                    ? "finish_rejected_incomplete"
+                    : "finish_rejected_no_action";
+            BotLog.comm(bot, event,
                     "request", trunc(conversation.lastToolIntent, 100),
                     "summary", trunc(summary, 100));
-            trace(bot, "!! 还没执行行动，拒绝 finish");
+            trace(bot, decision.reason().startsWith("rejected_incomplete")
+                    ? "!! 完整要求还有下一步，拒绝 finish"
+                    : "!! 还没执行行动，拒绝 finish");
         } else if (decision.rewritten()) {
             logPrematureCompletionRewrite(bot, "finish", summary, decision.speech());
         }
@@ -563,8 +579,8 @@ public final class BrainCoordinator {
         return reserved;
     }
 
-    /** Called after a successful mutating/action tool result so verbal-only finish cannot pass. */
-    void recordSuccessfulActionTool(AIPlayerEntity bot, String toolName) {
+    /** Called after a successful tool result; only capabilities relevant to the owner's ask count. */
+    void recordSuccessfulActionTool(AIPlayerEntity bot, String toolName, boolean durableWorkStarted) {
         if (!FactualityGate.isActionTool(toolName)) {
             return;
         }
@@ -572,18 +588,52 @@ public final class BrainCoordinator {
         if (conversation == null) {
             return;
         }
-        conversation.actionDispatchedThisTurn = true;
-        if (TaskManager.INSTANCE.getActive(bot).isPresent()
-                || io.github.zoyluo.aibot.goal.GoalExecutor.INSTANCE.hasActivePlan(bot)) {
-            conversation.taskDispatchedThisTurn = true;
+        Set<FactualityGate.ActionCapability> relevant = FactualityGate.relevantCapabilities(
+                conversation.executionRequest, toolName);
+        if (relevant.isEmpty()) {
+            BotLog.comm(bot, "irrelevant_action_not_counted", "tool", toolName,
+                    "request", trunc(conversation.executionRequest, 100));
+            return;
         }
-        BotLog.comm(bot, "action_dispatched_this_turn", "tool", toolName);
+        conversation.actionDispatchedThisTurn = true;
+        conversation.actionRecoveryAttempted = false;
+        conversation.relevantTaskFailed = false;
+        if (durableWorkStarted) {
+            conversation.taskDispatchedThisTurn = true;
+            conversation.pendingCapabilities.addAll(relevant);
+            conversation.pendingEvidenceTask = TaskManager.INSTANCE.getActive(bot).orElse(null);
+            conversation.pendingEvidenceGoal = io.github.zoyluo.aibot.goal.GoalExecutor.INSTANCE.hasActivePlan(bot);
+        } else {
+            conversation.completedCapabilities.addAll(relevant);
+        }
+        BotLog.comm(bot, "action_evidence_recorded", "tool", toolName,
+                "durable", durableWorkStarted, "capabilities", relevant);
+    }
+
+    boolean isActionToolRelevantToCurrentWork(AIPlayerEntity bot, String toolName) {
+        if (!FactualityGate.isActionTool(toolName)) {
+            return true;
+        }
+        BotConversation conversation = conversations.get(bot.getUuid());
+        if (conversation == null) {
+            return true;
+        }
+        if (conversation.currentMessagePreservesWork) {
+            return false;
+        }
+        if (conversation.requiredCapabilities.isEmpty()) {
+            return true;
+        }
+        return !FactualityGate.relevantCapabilities(conversation.executionRequest, toolName).isEmpty();
     }
 
     private static FactualityGate.Context factualityContext(AIPlayerEntity bot, BotConversation conversation) {
+        settleExecutionEvidence(bot, conversation);
         boolean activeGoal = io.github.zoyluo.aibot.goal.GoalExecutor.INSTANCE.hasActivePlan(bot);
         boolean runningTask = TaskManager.INSTANCE.getActive(bot).isPresent() || TaskManager.INSTANCE.hasPaused(bot);
-        TaskState taskState = TaskManager.INSTANCE.status(bot).state();
+        boolean allRequirementsCompleted = !conversation.requiredCapabilities.isEmpty()
+                && conversation.pendingCapabilities.isEmpty()
+                && conversation.completedCapabilities.containsAll(conversation.requiredCapabilities);
         return new FactualityGate.Context(
                 conversation.lastToolIntent,
                 conversation.fromOwner,
@@ -591,17 +641,76 @@ public final class BrainCoordinator {
                 runningTask,
                 activeGoal,
                 conversation.taskDispatchedThisTurn,
-                taskState == TaskState.COMPLETED,
-                taskState == TaskState.FAILED);
+                allRequirementsCompleted,
+                conversation.relevantTaskFailed);
+    }
+
+    private static void resetExecutionEvidence(BotConversation conversation, String request) {
+        conversation.executionRequest = request == null ? "" : request;
+        conversation.executionFromOwner = conversation.fromOwner;
+        conversation.requiredCapabilities.clear();
+        conversation.requiredCapabilities.addAll(FactualityGate.requiredCapabilities(request));
+        conversation.completedCapabilities.clear();
+        conversation.pendingCapabilities.clear();
+        conversation.pendingEvidenceTask = null;
+        conversation.pendingEvidenceGoal = false;
+        conversation.relevantTaskFailed = false;
+        conversation.actionDispatchedThisTurn = false;
+        conversation.taskDispatchedThisTurn = false;
+    }
+
+    private static void settleExecutionEvidence(AIPlayerEntity bot, BotConversation conversation) {
+        if (conversation.pendingCapabilities.isEmpty()) {
+            return;
+        }
+        boolean activeGoal = io.github.zoyluo.aibot.goal.GoalExecutor.INSTANCE.hasActivePlan(bot);
+        if (conversation.pendingEvidenceGoal && activeGoal) {
+            return;
+        }
+        TaskState state;
+        if (conversation.pendingEvidenceGoal) {
+            state = io.github.zoyluo.aibot.goal.GoalExecutor.INSTANCE.lastSettledState(bot)
+                    .orElseGet(() -> TaskManager.INSTANCE.status(bot).state());
+        } else if (conversation.pendingEvidenceTask != null) {
+            state = conversation.pendingEvidenceTask.state();
+        } else {
+            return;
+        }
+        if (state != TaskState.COMPLETED && state != TaskState.FAILED) {
+            return;
+        }
+        if (state == TaskState.COMPLETED) {
+            conversation.completedCapabilities.addAll(conversation.pendingCapabilities);
+        } else {
+            conversation.relevantTaskFailed = true;
+        }
+        BotLog.comm(bot, "action_evidence_settled", "state", state,
+                "capabilities", conversation.pendingCapabilities);
+        conversation.pendingCapabilities.clear();
+        conversation.pendingEvidenceTask = null;
+        conversation.pendingEvidenceGoal = false;
+    }
+
+    private static boolean hasOutstandingExecutionRequirement(BotConversation conversation) {
+        if (conversation.requiredCapabilities.isEmpty()) {
+            return false;
+        }
+        EnumSet<FactualityGate.ActionCapability> covered = EnumSet.noneOf(
+                FactualityGate.ActionCapability.class);
+        covered.addAll(conversation.completedCapabilities);
+        covered.addAll(conversation.pendingCapabilities);
+        return !covered.containsAll(conversation.requiredCapabilities);
     }
 
     private static boolean needsActionDispatchRecovery(AIPlayerEntity bot,
                                                         BotConversation conversation,
                                                         String modelText) {
         FactualityGate.Context context = factualityContext(bot, conversation);
-        return context.fromOwner()
-                && FactualityGate.requiresActionDispatch(context.request())
-                && !context.actionDispatched()
+        return conversation.executionFromOwner
+                && FactualityGate.requiresActionDispatch(conversation.executionRequest)
+                && hasOutstandingExecutionRequirement(conversation)
+                && !context.runningWork()
+                && !context.activeGoal()
                 && !FactualityGate.isClarificationRequest(modelText);
     }
 
@@ -775,8 +884,11 @@ public final class BrainCoordinator {
         if (FactualityGate.isStatusQuestion(text) || FactualityGate.isInformationalQuestion(text)) {
             return true;
         }
+        if (FactualityGate.requiresActionDispatch(text)) {
+            return false;
+        }
         if (containsAny(text,
-                "停", "停止", "取消", "别", "改", "换", "放弃", "回来", "过来", "跟", "去", "做", "挖", "采", "收集", "找", "盖", "建", "杀", "打", "保护", "逃", "给我", "拿", "睡", "开始", "饿", "吃", "command", "tp", "传送")) {
+                "改", "换", "command", "tp", "传送")) {
             return false;
         }
         if (text.endsWith("?") || text.endsWith("？")
@@ -1265,7 +1377,7 @@ public final class BrainCoordinator {
 
                 只做当前消息真正要求的事。问候、吐槽和问状态时只简短回答；不要无故播报、不要复述用户的话、不要说“收到/正在为您/我将”。有正在跑的任务时，主人只是聊天或问进度并不代表取消任务；只有明确说停、改、换目标才停止。
 
-                每个对话轮最多一句有声短话：要么调用一次 speak 后再用 finish 静默收尾，要么直接让 finish 念 summary；绝不连续 speak，也不在 speak 后重复同义 summary。finish 只关闭当前对话轮次，绝不代表行动或任务已经完成。派发了持续任务、目标或导航后就立即 finish 并等待系统通知，此时只能说“开始了/还在做”，绝不能说“完成了/拿到了/搞定了”。只有系统明确给出任务状态 COMPLETED 才能说完成，失败要如实说卡在哪里。
+                每个对话轮最多一句有声短话：要么调用一次 speak 后再用 finish 静默收尾，要么直接让 finish 念 summary；绝不连续 speak，也不在 speak 后重复同义 summary。行动要求先调用真正办事的工具，不要先口头答应。每次响应最多启动一个持续任务；复合要求等这一步结束再做下一步，不能用后一个任务顶掉前一个。finish 只关闭当前对话轮次，绝不代表行动或任务已经完成。派发了持续任务、目标或导航后就立即 finish 并等待系统通知，此时只能说实际状态，绝不能说“完成了/拿到了/搞定了”。只有系统明确给出任务状态 COMPLETED，且主人完整要求的每一部分都达成，才能说完成；失败要如实说卡在哪里。
 
                 移动只用 smart_navigate，战斗只用 smart_combat；它们会处理绕路、跳跃、普通障碍和安全。成品、工具、盔甲和锭优先 achieve_goal；矿石用 mine_ore；木石等基础材料用 gather。回答“附近有没有/在哪里”之前先 scan_surroundings。空间指代“那里/标记处”使用 use_marker，位置不明就问一句，不要猜。
 
@@ -1289,6 +1401,18 @@ public final class BrainCoordinator {
         private io.github.zoyluo.aibot.task.Task turnStartTask; // 本轮 dispatch 前已在跑的任务;续航据此判断本轮是否新派了任务
         private String lastUserRequest; // 最近一条真人消息原文(≤120字):task_done_wake 回灌,治复合指令只做一半
         private String lastToolIntent = ""; // 最近一条请求:用于给 Step 裁剪本轮工具面，避免 124 个工具互相干扰
+        private String executionRequest = ""; // 当前工作真正要满足的主人要求；聊天/问进度不覆盖它
+        private boolean executionFromOwner;
+        private boolean currentMessagePreservesWork;
+        private final Set<FactualityGate.ActionCapability> requiredCapabilities =
+                EnumSet.noneOf(FactualityGate.ActionCapability.class);
+        private final Set<FactualityGate.ActionCapability> completedCapabilities =
+                EnumSet.noneOf(FactualityGate.ActionCapability.class);
+        private final Set<FactualityGate.ActionCapability> pendingCapabilities =
+                EnumSet.noneOf(FactualityGate.ActionCapability.class);
+        private io.github.zoyluo.aibot.task.Task pendingEvidenceTask;
+        private boolean pendingEvidenceGoal;
+        private boolean relevantTaskFailed;
         private boolean actionDispatchedThisTurn; // 新用户消息时清零；成功行动工具置 true，防口头答应后直接 finish
         private boolean taskDispatchedThisTurn; // 当前轮派出的长期任务未得到 COMPLETED 前，禁止任务完成口播
         private boolean actionRecoveryAttempted; // 模型没有调工具时只补一次，防止消耗额度的无穷自问

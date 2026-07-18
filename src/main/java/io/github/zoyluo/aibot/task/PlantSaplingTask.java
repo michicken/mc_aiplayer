@@ -15,7 +15,7 @@ import net.minecraft.util.math.BlockPos;
 /**
  * 种树苗:在身边草地/泥土上把背包里的 *_sapling 种下去(间距 ≥3 防长成连体树)。
  * 砍树后补种是"环保主播"人设的标准动作,树苗来源=砍树时树叶自然掉落。
- * best-effort:种下 ≥1 棵就算完成。
+ * 只有种够请求数量才完成；树苗或空地不足时如实报告部分进度。
  */
 public final class PlantSaplingTask extends AbstractTask {
     private static final int MAX_ELAPSED = 900;
@@ -151,11 +151,7 @@ public final class PlantSaplingTask extends AbstractTask {
     }
 
     private void finishOrFail(String reason) {
-        if (planted > 0) {
-            complete();
-        } else {
-            fail(reason);
-        }
+        fail(reason + " planted=" + planted + "/" + target);
     }
 
     @Override

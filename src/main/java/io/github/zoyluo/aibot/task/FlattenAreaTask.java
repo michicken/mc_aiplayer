@@ -27,6 +27,7 @@ public final class FlattenAreaTask extends AbstractTask {
     private final BlockMiner miner = new BlockMiner();
     private final Set<BlockPos> blacklist = new HashSet<>();
     private BlockPos current;
+    private BlockPos center;
     private int approachStart;
     private int floorY;
     private int cleared;
@@ -61,6 +62,7 @@ public final class FlattenAreaTask extends AbstractTask {
 
     @Override
     protected void onStart(AIPlayerEntity bot) {
+        center = bot.getBlockPos().toImmutable();
         floorY = bot.getBlockPos().getY();
         cleared = 0;
         current = null;
@@ -74,7 +76,7 @@ public final class FlattenAreaTask extends AbstractTask {
     @Override
     protected void onTick(AIPlayerEntity bot) {
         if (elapsed > MAX_ELAPSED) {
-            finishOrFail("flatten_timeout");
+            finishOrFail(bot, "flatten_timeout");
             return;
         }
         HarvestCore.forcePickupNearbyAnyOf(bot, null, 4, 2);
@@ -97,7 +99,7 @@ public final class FlattenAreaTask extends AbstractTask {
             current = nextTarget(bot);
             if (current == null) {
                 bot.getActionPack().stopMovement();
-                complete();
+                finishOrFail(bot, "flatten_incomplete");
                 return;
             }
             approachStart = elapsed;
@@ -124,8 +126,8 @@ public final class FlattenAreaTask extends AbstractTask {
         BlockPos best = null;
         double bestDist = Double.MAX_VALUE;
         for (BlockPos pos : BlockPos.iterate(
-                new BlockPos(feet.getX() - radius, floorY, feet.getZ() - radius),
-                new BlockPos(feet.getX() + radius, floorY + CLEAR_HEIGHT - 1, feet.getZ() + radius))) {
+                new BlockPos(center.getX() - radius, floorY, center.getZ() - radius),
+                new BlockPos(center.getX() + radius, floorY + CLEAR_HEIGHT - 1, center.getZ() + radius))) {
             if (blacklist.contains(pos) || !isMineable(world, pos)) {
                 continue;
             }
@@ -148,11 +150,10 @@ public final class FlattenAreaTask extends AbstractTask {
 
     private int countTargets(AIPlayerEntity bot) {
         ServerWorld world = bot.getServerWorld();
-        BlockPos feet = bot.getBlockPos();
         int count = 0;
         for (BlockPos pos : BlockPos.iterate(
-                new BlockPos(feet.getX() - radius, floorY, feet.getZ() - radius),
-                new BlockPos(feet.getX() + radius, floorY + CLEAR_HEIGHT - 1, feet.getZ() + radius))) {
+                new BlockPos(center.getX() - radius, floorY, center.getZ() - radius),
+                new BlockPos(center.getX() + radius, floorY + CLEAR_HEIGHT - 1, center.getZ() + radius))) {
             if (isMineable(world, pos)) {
                 count++;
             }
@@ -160,11 +161,13 @@ public final class FlattenAreaTask extends AbstractTask {
         return count;
     }
 
-    private void finishOrFail(String reason) {
-        if (cleared > 0) {
+    private void finishOrFail(AIPlayerEntity bot, String reason) {
+        int remaining = countTargets(bot);
+        if (remaining == 0) {
             complete();
         } else {
-            fail(reason);
+            fail(reason + " cleared=" + cleared + "/" + totalEstimate
+                    + " remaining=" + remaining + " unreachable=" + blacklist.size());
         }
     }
 

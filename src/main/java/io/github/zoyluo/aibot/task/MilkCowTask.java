@@ -9,7 +9,7 @@ import net.minecraft.item.Items;
 
 /**
  * 挤奶任务:找最近的成年牛、靠近、用空桶挤出 target 桶牛奶(MILK_BUCKET)。
- * best-effort:没空桶/周围没牛/久无进展时,已挤到 ≥1 桶就完成、一桶没挤到才失败(不阻断上层目标)。
+ * 只有挤够请求数量才完成；部分结果如实失败，交给上层补桶或继续找牛。
  */
 public final class MilkCowTask extends AbstractTask {
     private static final double SEARCH = 32.0D;
@@ -83,10 +83,6 @@ public final class MilkCowTask extends AbstractTask {
     }
 
     private void finishOrFail(String reason) {
-        if (milked > 0) {
-            complete();
-        } else {
-            fail(reason);
-        }
+        fail(reason + " milked=" + milked + "/" + target);
     }
 }

@@ -147,11 +147,7 @@ public final class ThrowAtTask extends AbstractTask {
     }
 
     private void finishOrFail(String reason) {
-        if (thrown > 0) {
-            complete();
-        } else {
-            fail(reason);
-        }
+        fail(reason + " thrown=" + thrown + "/" + throwsWanted);
     }
 
     @Override

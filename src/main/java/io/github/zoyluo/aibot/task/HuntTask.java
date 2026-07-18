@@ -199,12 +199,8 @@ public final class HuntTask extends AbstractTask {
         if (roamForPrey(bot)) {
             return;
         }
-        // 漫游也用尽仍找不到:已猎到一些就尽力收(总比空手好),一块没有才失败。
-        if (collected > 0) {
-            complete();
-            return;
-        }
-        fail("no_prey_found roams=" + roamCount);
+        // 有部分收获也不等于达成配额；FAILED 会把精确进度交给大脑换区或如实汇报。
+        fail("no_prey_found collected=" + collected + "/" + targetMeat + " roams=" + roamCount);
     }
 
     // 找不到猎物 → 走到 ROAM_DISTANCE 外的露天地表换片再找;最多 MAX_PREY_ROAMS 次。
@@ -343,12 +339,8 @@ public final class HuntTask extends AbstractTask {
                 }
                 target = null;
                 approachStuckPos = null;
-                if (!roamForPrey(bot)) {        // 换地方找猎物;漫游用尽才收尾
-                    if (collected > 0) {
-                        complete();
-                    } else {
-                        fail("hunt_stuck_no_escape");
-                    }
+                if (!roamForPrey(bot)) {        // 换地方找猎物;漫游用尽才如实失败
+                    fail("hunt_stuck_no_escape collected=" + collected + "/" + targetMeat);
                 }
                 lastProgressTick = elapsed;
             }

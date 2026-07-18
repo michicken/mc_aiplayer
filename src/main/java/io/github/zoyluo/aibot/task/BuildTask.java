@@ -47,6 +47,7 @@ public final class BuildTask extends AbstractTask {
     private int retryTicks;
     private int placeDelayTicks;
     private boolean flattenMiningStarted;
+    private int skippedPlacements;
     private String note = "";
 
     public BuildTask(BlueprintSchema blueprint, BlockPos anchor) {
@@ -77,7 +78,9 @@ public final class BuildTask extends AbstractTask {
         if (state == TaskState.COMPLETED) {
             return 1.0D;
         }
-        double buildProgress = blueprint.placements().isEmpty() ? 1.0D : Math.min(1.0D, (double) nextIndex / blueprint.placements().size());
+        double buildProgress = blueprint.placements().isEmpty()
+                ? 1.0D
+                : Math.min(0.95D, (double) nextIndex / blueprint.placements().size());
         return switch (phase) {
             case SITE -> 0.0D;
             case FLATTEN -> Math.min(0.25D, flattenTargets.isEmpty() ? 0.25D : 0.10D);
@@ -104,6 +107,7 @@ public final class BuildTask extends AbstractTask {
         flattenTargets.clear();
         currentFlattenTarget = null;
         flattenMiningStarted = false;
+        skippedPlacements = 0;
         phase = Phase.SITE;
     }
 
@@ -245,18 +249,25 @@ public final class BuildTask extends AbstractTask {
 
     private void build(AIPlayerEntity bot) {
         if (nextIndex >= blueprint.placements().size()) {
-            complete();
+            int verified = verifiedPlacements(bot);
+            if (verified == blueprint.placements().size()) {
+                complete();
+            } else {
+                fail("build_incomplete verified=" + verified + "/" + blueprint.placements().size()
+                        + " skipped=" + skippedPlacements);
+            }
             return;
         }
         // 落块格预算(镜像 flatten 50t skip):同一块连续放不到——moveWithinReach 永续寻路(nearbyStand 退化
-        // 走向自己/够不到,executor 非 idle 时只 return false 不计 retryTicks)→ 80t 跳过该块继续盖,best-effort
-        // 不卡死到 build_timeout(real_build 实测卡 block 54 死住 ~16000t 的根因)。完工判 ≥80/116 容忍少量跳过。
+        // 走向自己/够不到,executor 非 idle 时只 return false 不计 retryTicks)→ 80t 暂时跳过该块继续盖,
+        // 最后统一回读蓝图验收；缺一块都报 build_incomplete，不把“索引走完”冒充完工。
         if (nextIndex != buildTargetIndex) {
             buildTargetIndex = nextIndex;
             buildTargetTick = elapsed;
             retryTicks = 0;
         } else if (elapsed - buildTargetTick > 80) {
             note = "build_skip=" + nextIndex + "@" + elapsed;
+            skippedPlacements++;
             nextIndex++;
             retryTicks = 0;
             return;
@@ -299,12 +310,32 @@ public final class BuildTask extends AbstractTask {
         }
         placeDelayTicks = 5;
         if (retryTicks > 12) {
-            // best-effort:这一块反复放不到(障碍/视线/支撑缺)→ 跳过继续盖,不毁整任务(real 地形单块卡不该全败;
-            // 完工判 ≥80/116 容忍)。与上面的 80t 预算双保险:谁先到谁跳。
+            // 这一块反复放不到(障碍/视线/支撑缺)→ 暂时跳过继续盖；最后世界状态验收会如实失败。
             note = "build_skip_placefail=" + nextIndex + ":" + result.reason();
+            skippedPlacements++;
             nextIndex++;
             retryTicks = 0;
         }
+    }
+
+    private int verifiedPlacements(AIPlayerEntity bot) {
+        int verified = 0;
+        for (BlueprintSchema.BlockPlacement placement : blueprint.placements()) {
+            BlockPos pos = anchor.add(placement.dx(), placement.dy(), placement.dz());
+            Block block = Registries.BLOCK.get(Identifier.of(placement.blockId()));
+            if (block == Blocks.AIR) {
+                if (bot.getServerWorld().getBlockState(pos).isAir()) {
+                    verified++;
+                }
+                continue;
+            }
+            if (bot.getServerWorld().getBlockState(pos).isOf(block)
+                    || (placement.palette() != null
+                    && MaterialPalette.matchesBlock(bot.getServerWorld().getBlockState(pos), placement.palette()))) {
+                verified++;
+            }
+        }
+        return verified;
     }
 
     private OptionalInt materialSlot(AIPlayerEntity bot, BlueprintSchema.BlockPlacement placement, Block block) {

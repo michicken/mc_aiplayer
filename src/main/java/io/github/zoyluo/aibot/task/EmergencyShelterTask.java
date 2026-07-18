@@ -52,11 +52,7 @@ public final class EmergencyShelterTask extends AbstractTask {
     @Override
     protected void onTick(AIPlayerEntity bot) {
         if (elapsed > 120) {
-            if (placed > 0) {
-                complete();
-            } else {
-                fail("shelter_timeout");
-            }
+            fail("shelter_timeout placed=" + placed + " remaining=" + targets.size());
             return;
         }
         OptionalInt blockSlot = findShelterBlockSlot(bot);
@@ -75,9 +71,10 @@ public final class EmergencyShelterTask extends AbstractTask {
             fail("cannot_equip_shelter_block");
             return;
         }
-        ActionResult result = BuildAction.placeBlockAt(bot, targets.poll());
+        ActionResult result = BuildAction.placeBlockAt(bot, targets.peek());
         if (result.isSuccess()) {
             placed++;
+            targets.poll();
         }
         if (targets.isEmpty()) {
             complete();

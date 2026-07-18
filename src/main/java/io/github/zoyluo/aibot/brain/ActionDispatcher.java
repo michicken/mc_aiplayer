@@ -4,6 +4,8 @@ import com.google.gson.JsonObject;
 import io.github.zoyluo.aibot.AIBotConfig;
 import io.github.zoyluo.aibot.entity.AIPlayerEntity;
 import io.github.zoyluo.aibot.log.BotLog;
+import io.github.zoyluo.aibot.task.Task;
+import io.github.zoyluo.aibot.task.TaskManager;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -29,19 +31,38 @@ public final class ActionDispatcher {
         int maxCalls = AIBotConfig.get().brain().maxToolCallsPerTurn();
         List<ChatMessage> results = new ArrayList<>();
         boolean turnClosed = false;
+        boolean durableWorkStartedInBatch = false;
         for (int index = 0; index < calls.size(); index++) {
             ChatToolCall call = calls.get(index);
             ToolDefinition.ToolResult result;
+            boolean durableWorkStarted = false;
             if (turnClosed) {
                 result = new ToolDefinition.ToolResult(false,
                         "skipped_after_finish: finish 已关闭本轮，后续工具没有执行");
+            } else if (durableWorkStartedInBatch && !FactualityGate.isSafeAfterTaskStart(call.name())) {
+                result = new ToolDefinition.ToolResult(false,
+                        "skipped_after_task_start: 本批已经启动一个持续任务。后续行动没有执行；"
+                                + "等当前任务结束后再决定下一步，避免后一个任务悄悄中止前一个。");
+            } else if (!BrainCoordinator.INSTANCE.isActionToolRelevantToCurrentWork(bot, call.name())) {
+                result = new ToolDefinition.ToolResult(false,
+                        "irrelevant_action_for_request: 这个工具不能证明主人当前要求有进展。"
+                                + "请改用直接完成目标的高层工具，准备动作和表演不能冒充执行。");
             } else if (index >= maxCalls) {
                 result = new ToolDefinition.ToolResult(false, "throttled");
             } else {
+                Task taskBefore = TaskManager.INSTANCE.getActive(bot).orElse(null);
+                boolean goalBefore = io.github.zoyluo.aibot.goal.GoalExecutor.INSTANCE.hasActivePlan(bot);
                 result = invoke(bot, call);
+                Task taskAfter = TaskManager.INSTANCE.getActive(bot).orElse(null);
+                boolean goalAfter = io.github.zoyluo.aibot.goal.GoalExecutor.INSTANCE.hasActivePlan(bot);
+                durableWorkStarted = result.ok()
+                        && ((taskAfter != null && taskAfter != taskBefore) || (!goalBefore && goalAfter));
             }
             if (result.ok()) {
-                BrainCoordinator.INSTANCE.recordSuccessfulActionTool(bot, call.name());
+                BrainCoordinator.INSTANCE.recordSuccessfulActionTool(bot, call.name(), durableWorkStarted);
+            }
+            if (durableWorkStarted) {
+                durableWorkStartedInBatch = true;
             }
             BotLog.action(bot, "tool_result", "tool", call.name(), "ok", result.ok(), "message", result.message());
             results.add(ChatMessage.toolResult(call.id(), result.toToolContent(), call.name()));

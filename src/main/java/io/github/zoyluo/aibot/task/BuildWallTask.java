@@ -80,11 +80,11 @@ public final class BuildWallTask extends AbstractTask {
     protected void onTick(AIPlayerEntity bot) {
         if (col >= length) {
             bot.getActionPack().stopMovement();
-            finishOrFail("wall_done");
+            finishOrFail(bot, "wall_incomplete");
             return;
         }
         if (elapsed > MAX_ELAPSED) {
-            finishOrFail("wall_timeout");
+            finishOrFail(bot, "wall_timeout");
             return;
         }
         if (placeDelayTicks > 0) {
@@ -124,7 +124,7 @@ public final class BuildWallTask extends AbstractTask {
             bot.getActionPack().stopMovement();
             OptionalInt slot = BridgeTask.fillerSlot(bot);
             if (slot.isEmpty()) {
-                finishOrFail("wall_no_blocks: 背包没有可砌方块(木板/圆石/泥土)");
+                finishOrFail(bot, "wall_no_blocks: 背包没有可砌方块(木板/圆石/泥土)");
                 return;
             }
             InventoryAction.equipFromSlot(bot, slot.getAsInt());
@@ -184,11 +184,19 @@ public final class BuildWallTask extends AbstractTask {
         return null;
     }
 
-    private void finishOrFail(String reason) {
-        if (placed > 0 || "wall_done".equals(reason)) {
+    private void finishOrFail(AIPlayerEntity bot, String reason) {
+        boolean completeWall = columns != null && columns.stream().allMatch(base -> {
+            for (int h = 0; h < height; h++) {
+                if (bot.getServerWorld().getBlockState(base.up(h)).isReplaceable()) {
+                    return false;
+                }
+            }
+            return true;
+        });
+        if (completeWall) {
             complete();
         } else {
-            fail(reason);
+            fail(reason + " placed=" + placed + "/" + (length * height));
         }
     }
 

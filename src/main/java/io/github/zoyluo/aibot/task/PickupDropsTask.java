@@ -53,11 +53,7 @@ public final class PickupDropsTask extends AbstractTask {
         if (elapsed > MAX_ELAPSED) {
             bot.getActionPack().stopMovement();
             int picked = HarvestCore.totalInventoryCount(bot) - baseline;
-            if (picked > 0) {
-                complete(); // 超时但有收获=够不着的剩件不算失败
-            } else {
-                fail("pickup_timeout");
-            }
+            fail("pickup_timeout picked=" + Math.max(0, picked) + " remaining_in_radius=true");
             return;
         }
         HarvestCore.chaseDropAnyOf(bot, null, radius);

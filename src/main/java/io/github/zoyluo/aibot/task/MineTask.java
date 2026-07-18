@@ -160,7 +160,11 @@ public final class MineTask extends AbstractTask {
             if (partial > 0) {
                 BotLog.action(bot, "pickup_collected", "count", partial, "reason", "partial_pickup");
                 countSoFar += partial;
-                complete();
+                if (countSoFar >= countNeeded) {
+                    complete();
+                } else {
+                    phase = Phase.SEARCHING;
+                }
                 return;
             }
             fail("pickup_timeout");

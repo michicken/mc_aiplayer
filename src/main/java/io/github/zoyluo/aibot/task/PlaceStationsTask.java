@@ -6,6 +6,7 @@ import io.github.zoyluo.aibot.action.InventoryAction;
 import io.github.zoyluo.aibot.entity.AIPlayerEntity;
 import net.minecraft.item.Item;
 import net.minecraft.item.Items;
+import net.minecraft.registry.Registries;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
@@ -58,21 +59,21 @@ public final class PlaceStationsTask extends AbstractTask {
     @Override
     protected void onTick(AIPlayerEntity bot) {
         if (elapsed > MAX_ELAPSED) {
-            if (placed > 0) {
-                complete();
-            } else {
-                fail("place_stations_timeout");
-            }
+            fail("place_stations_timeout placed=" + placed + "/" + STATIONS.size());
             return;
         }
         if (pending.isEmpty()) {
-            complete();
+            if (placed == STATIONS.size()) {
+                complete();
+            } else {
+                fail("place_stations_incomplete placed=" + placed + "/" + STATIONS.size());
+            }
             return;
         }
         Item station = pending.get(0);
         int slot = findSlot(bot, station);
         if (slot < 0) {
-            pending.remove(0); // 背包没这件了 → 跳过
+            fail("missing_station:" + Registries.ITEM.getId(station));
             return;
         }
         BlockPos spot = findFreeSpot(bot);
@@ -81,7 +82,7 @@ public final class PlaceStationsTask extends AbstractTask {
             return;
         }
         if (InventoryAction.equipFromSlot(bot, slot) < 0) {
-            pending.remove(0);
+            fail("cannot_equip_station:" + Registries.ITEM.getId(station));
             return;
         }
         ActionResult result = BuildAction.placeBlockAt(bot, spot);

@@ -12,6 +12,8 @@ class FactualityGateTest {
         assertTrue(FactualityGate.containsCompletionClaim("已挖掉标记处的树，拿到木头。"));
         assertTrue(FactualityGate.containsCompletionClaim("已经完成了，搞定。"));
         assertTrue(FactualityGate.containsCompletionClaim("木头收集到了。"));
+        assertTrue(FactualityGate.containsCompletionClaim("木头到手，齐活。"));
+        assertTrue(FactualityGate.containsCompletionClaim("材料备齐，房子完工。"));
         assertTrue(FactualityGate.containsCompletionClaim("Task finished."));
         assertTrue(FactualityGate.containsCompletionClaim("Done"));
     }
@@ -65,13 +67,13 @@ class FactualityGateTest {
 
         assertTrue(decision.allowed());
         assertTrue(decision.rewritten());
-        assertEquals("还在收集，拿到手我再告诉你。", decision.speech());
+        assertEquals("还没收齐，我接着找。", decision.speech());
     }
 
     @Test
     void taskAssignmentIsNotCompletionEvidence() {
         FactualityGate.Context context = new FactualityGate.Context(
-                "去标记处砍一棵树", true, true, false, false,
+                "去标记处砍一棵树", true, true, true, false,
                 true, false, false);
 
         FactualityGate.FinishDecision decision = FactualityGate.reviewFinish(
@@ -80,7 +82,21 @@ class FactualityGateTest {
 
         assertTrue(decision.allowed());
         assertTrue(decision.rewritten());
-        assertEquals("还在收集，拿到手我再告诉你。", decision.speech());
+        assertEquals("还没收齐，我接着找。", decision.speech());
+    }
+
+    @Test
+    void rejectsClosingAfterOnlyACompletedPreparatoryStep() {
+        FactualityGate.Context context = new FactualityGate.Context(
+                "去标记处砍一棵树", true, true, false, false,
+                true, false, false);
+
+        FactualityGate.FinishDecision decision = FactualityGate.reviewFinish(
+                context, "我已经走到树边了，接下来去砍。"
+        );
+
+        assertFalse(decision.allowed());
+        assertTrue(decision.reason().contains("rejected_incomplete"));
     }
 
     @Test
@@ -118,7 +134,7 @@ class FactualityGateTest {
         );
 
         assertTrue(decision.rewritten());
-        assertEquals("还在弄，真做完了我再说。", decision.speech());
+        assertEquals("还没做完，我接着干。", decision.speech());
     }
 
     @Test
@@ -142,6 +158,37 @@ class FactualityGateTest {
         assertFalse(FactualityGate.isActionTool("finish"));
         assertFalse(FactualityGate.isActionTool("scan_surroundings"));
         assertFalse(FactualityGate.isActionTool("get_task_status"));
+        assertTrue(FactualityGate.isActionTool("emote"));
+        assertTrue(FactualityGate.isSafeAfterTaskStart("finish"));
+        assertFalse(FactualityGate.isSafeAfterTaskStart("gather"));
+    }
+
+    @Test
+    void distinguishesPreparatoryMovementFromTheRequestedTreeHarvest() {
+        var required = FactualityGate.requiredCapabilities("去标记处砍一棵树");
+        var navigation = FactualityGate.relevantCapabilities("去标记处砍一棵树", "smart_navigate");
+        var gathering = FactualityGate.relevantCapabilities("去标记处砍一棵树", "gather");
+        var equipment = FactualityGate.relevantCapabilities("去标记处砍一棵树", "equip_best_tool");
+
+        assertTrue(required.contains(FactualityGate.ActionCapability.NAVIGATION));
+        assertTrue(required.contains(FactualityGate.ActionCapability.RESOURCE));
+        assertTrue(navigation.contains(FactualityGate.ActionCapability.NAVIGATION));
+        assertFalse(navigation.contains(FactualityGate.ActionCapability.RESOURCE));
+        assertTrue(gathering.containsAll(required));
+        assertTrue(equipment.isEmpty());
+    }
+
+    @Test
+    void deliveryRequiresBothObtainingAndActuallyHandingOverTheItem() {
+        var required = FactualityGate.requiredCapabilities("拿来一把铁镐");
+        var obtain = FactualityGate.relevantCapabilities("拿来一把铁镐", "achieve_goal");
+        var deliver = FactualityGate.relevantCapabilities("拿来一把铁镐", "give_item");
+
+        assertTrue(required.contains(FactualityGate.ActionCapability.CRAFT));
+        assertTrue(required.contains(FactualityGate.ActionCapability.NAVIGATION));
+        assertTrue(required.contains(FactualityGate.ActionCapability.INVENTORY));
+        assertFalse(obtain.contains(FactualityGate.ActionCapability.INVENTORY));
+        assertTrue(deliver.contains(FactualityGate.ActionCapability.INVENTORY));
     }
 
     @Test
@@ -151,5 +198,10 @@ class FactualityGateTest {
 
         assertTrue(FactualityGate.isUnbackedActionCommitment(context, "好，我马上去砍。"));
         assertFalse(FactualityGate.isUnbackedActionCommitment(context, "标记在哪个位置？"));
+
+        FactualityGate.Context onlyWalkedThere = new FactualityGate.Context(
+                "去标记处砍一棵树", true, true, false, false,
+                true, false, false);
+        assertTrue(FactualityGate.isUnbackedActionCommitment(onlyWalkedThere, "我现在去砍。"));
     }
 }

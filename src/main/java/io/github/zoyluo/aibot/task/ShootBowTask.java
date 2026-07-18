@@ -127,11 +127,7 @@ public final class ShootBowTask extends AbstractTask {
     /** 收口:任何退出路径都先松弓——complete()/fail() 不会触发 onAbort,漏松会永久卡拉弓姿势。 */
     private void finishOrFail(AIPlayerEntity bot, String reason) {
         bot.stopUsingItem();
-        if (shots > 0) {
-            complete();
-        } else {
-            fail(reason);
-        }
+        fail(reason + " shots=" + shots + "/" + shotsWanted);
     }
 
     @Override

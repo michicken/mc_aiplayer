@@ -18,7 +18,7 @@ import java.util.Set;
 /**
  * 村庄/野外收菜:大范围扫描成熟作物(小麦/胡萝卜/马铃薯/甜菜)、走过去收割、捡起掉落,直到收够 target 个产出。
  * 与 FarmTask(在固定区域开垦自种)不同——本任务找的是世界里已存在的成熟作物田(典型即村庄农田),不种、只收。
- * best-effort:扫不到成熟作物/久无进展时,收到 ≥1 个就完成、一个没收到才失败。
+ * 扫不到成熟作物或久无进展时如实失败并保留实际进度，不能把部分收成冒充目标配额。
  * 行为边界:只破坏并捡取作物本身(村民会自行补种,vanilla 不掉声望);不开村民箱子、不抢交易物——那不属于"收菜"。
  */
 public final class RaidCropsTask extends AbstractTask {
@@ -150,10 +150,6 @@ public final class RaidCropsTask extends AbstractTask {
     }
 
     private void finishOrFail(String reason) {
-        if (harvested > 0) {
-            complete();
-        } else {
-            fail(reason);
-        }
+        fail(reason + " harvested=" + harvested + "/" + target);
     }
 }

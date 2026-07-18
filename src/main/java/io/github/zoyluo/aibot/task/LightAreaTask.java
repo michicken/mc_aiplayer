@@ -65,10 +65,10 @@ public final class LightAreaTask extends AbstractTask {
             return;
         }
         if (InventoryAction.countItem(bot, Items.TORCH) <= 0) {
-            if (placed > 0) {
+            if (!hasDarkPlacement(bot)) {
                 complete();
             } else {
-                fail("missing minecraft:torch x1");
+                fail("missing minecraft:torch x1 placed=" + placed + "/" + maxTorches);
             }
             return;
         }
@@ -150,6 +150,13 @@ public final class LightAreaTask extends AbstractTask {
         return world.getBlockState(pos).isAir()
                 && !world.getBlockState(pos.down()).isAir()
                 && world.getLightLevel(LightType.BLOCK, pos) < threshold;
+    }
+
+    private boolean hasDarkPlacement(AIPlayerEntity bot) {
+        BlockPos origin = bot.getBlockPos();
+        int threshold = AIBotConfig.get().night().torchLightThreshold();
+        return BlockPos.stream(origin.add(-radius, -2, -radius), origin.add(radius, 3, radius))
+                .anyMatch(pos -> canPlaceTorchAt(bot, pos, threshold));
     }
 
     private static BlockPos adjacentStandPos(AIPlayerEntity bot, BlockPos target) {

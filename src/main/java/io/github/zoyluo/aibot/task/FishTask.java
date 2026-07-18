@@ -92,11 +92,7 @@ public final class FishTask extends AbstractTask {
     @Override
     protected void onTick(AIPlayerEntity bot) {
         if (elapsed > maxTicks) {
-            if (catches > 0) {
-                complete();
-            } else {
-                fail("fish_timeout");
-            }
+            fail("fish_timeout catches=" + catches + "/" + maxCatches);
             return;
         }
         switch (phase) {

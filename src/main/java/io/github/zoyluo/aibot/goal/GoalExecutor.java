@@ -46,6 +46,7 @@ public final class GoalExecutor {
     private final Map<UUID, java.util.Deque<Goal>> goalQueue = new ConcurrentHashMap<>();
     private final Map<UUID, Integer> lastGoalFailTick = new ConcurrentHashMap<>(); // 优化2:goal 整体失败时刻,拦大脑随后手动逐格挖矿
     private final Map<UUID, Goal> userGoal = new ConcurrentHashMap<>(); // B:用户原始高层目标,防大脑把它降级成其前置子目标(挖钻石→做铁镐)
+    private final Map<UUID, TaskState> lastSettledState = new ConcurrentHashMap<>();
 
     private GoalExecutor() {
     }
@@ -77,6 +78,7 @@ public final class GoalExecutor {
             report(bot, "记下了,等手头这件干完就去办:" + goalLabel(goal));
             return true;
         }
+        lastSettledState.remove(bot.getUuid());
         // B:保护用户原始目标——大脑不能把它降级成其前置子目标。实测:挖钻石失败后大脑 achieve_goal 做铁镐、
         // mine_ore 挖铁(都是挖钻石的前置)覆盖了目标,做完铁镐还误报"任务完成、最初要求是挖铁做镐"。
         Goal ug = userGoal.get(bot.getUuid());
@@ -92,10 +94,12 @@ public final class GoalExecutor {
                     "goal", goal,
                     "unresolved", plan.unresolved());
             recordGoalFailure(bot, goal, "planning_failed:" + String.join(",", plan.unresolved()));
+            lastSettledState.put(bot.getUuid(), TaskState.FAILED);
             return false;
         }
         if (plan.steps().isEmpty()) {
             activePlans.remove(bot.getUuid());
+            lastSettledState.put(bot.getUuid(), TaskState.COMPLETED);
             // 已满足也算目标成功:清掉此前同目标的持久失败经验，避免模型被过期教训误导。
             io.github.zoyluo.aibot.memory.EpisodeLog.INSTANCE.record(bot,
                     io.github.zoyluo.aibot.memory.EpisodeLog.Type.GOAL_DONE, bot.getBlockPos(), goalLabel(goal));
@@ -138,6 +142,7 @@ public final class GoalExecutor {
                 // step 既不活跃也不在暂停池 = 被玩家显式指令真正替换 → 放弃目标让位。
                 BotLog.task(bot, "goal_abandoned", "goal", plan.goal, "reason", "foreign_task_assigned");
                 activePlans.remove(bot.getUuid());
+                lastSettledState.put(bot.getUuid(), TaskState.FAILED);
                 return false;
             }
             return true;
@@ -172,8 +177,14 @@ public final class GoalExecutor {
         return activePlans.containsKey(bot.getUuid());
     }
 
+    /** Stable terminal evidence, unaffected by a follow/idle task being assigned afterwards. */
+    public Optional<TaskState> lastSettledState(AIPlayerEntity bot) {
+        return Optional.ofNullable(lastSettledState.get(bot.getUuid()));
+    }
+
     public void clear(AIPlayerEntity bot) {
         activePlans.remove(bot.getUuid());
+        lastSettledState.remove(bot.getUuid());
         // user goal 记录一并清:clear=外部要求彻底复位(verify 场景切换/管理操作)。只清 plan 不清它,
         // 残留的旧 Food 目标会把后续"恰好是其前置"的新目标 downgrade_blocked 拒掉
         //(实测 verify forage 的 HaveItem(浆果) 被上一场景 Food 残留拦截 goal_submit_failed)。
@@ -258,29 +269,40 @@ public final class GoalExecutor {
     private void assignNext(AIPlayerEntity bot, ActivePlan plan) {
         GoalStep step = plan.steps.pollFirst();
         if (step == null) {
-            // Food 目标续足:步骤跑完 ≠ 真凑够熟食。打猎扑空(附近动物少)、cookAll 只烤了部分生肉时,
-            // COOK_FOOD 会 collected>0 即 complete → 步骤耗尽 → 这里谎报"Food[4] 完成",实则只 2/4
-            // (real_food 随机地形实测此假完成占食物失败 3/10)。重规划一次让 GoalPlanner 重新感知择源:
-            // 它内部按 cooked>=target 判定——已够则返回空步骤(照常下面完成);不够且有源(浆果/种田/再打猎远征)
-            // 则给出补足步骤继续。仅对【独立 Food 目标】生效:挖矿/铁套的备粮是其计划内 best-effort 步,
-            // plan.goal 是 Diamond/Armor 而非 Food,不受影响(续航本就交饥饿链兜底,不该阻断挖矿)。
-            // replanCount<3 兜底:地形真无足量食物源时按尽力收尾,绝不无限循环。
-            if (plan.goal instanceof Goal.Food && bot.isAlive() && plan.replanCount < 3) {
-                GoalPlanner.GoalPlan fresh = GoalPlanner.plan(bot, plan.goal);
-                if (fresh.success() && !fresh.steps().isEmpty()) {
-                    plan.replanCount++;
-                    BotLog.task(bot, "goal_food_topup", "goal", plan.goal,
-                            "steps", fresh.describeSteps(), "replan", String.valueOf(plan.replanCount));
-                    plan.steps.clear();
-                    plan.steps.addAll(fresh.steps());
-                    plan.totalSteps = fresh.steps().size();
-                    plan.current = null;
-                    plan.currentTask = null;
-                    assignNext(bot, plan);
-                    return;
-                }
+            // A consumed step list is not proof of success. Re-plan against live inventory/world;
+            // empty steps means the goal predicate is now true, otherwise continue up to a bounded
+            // number of verification passes and then fail with evidence instead of claiming done.
+            GoalPlanner.GoalPlan verification = GoalPlanner.plan(bot, plan.goal);
+            if (verification.success() && !verification.steps().isEmpty() && plan.replanCount < 3) {
+                plan.replanCount++;
+                BotLog.task(bot, "goal_verification_topup", "goal", plan.goal,
+                        "steps", verification.describeSteps(), "replan", String.valueOf(plan.replanCount));
+                plan.steps.clear();
+                plan.steps.addAll(verification.steps());
+                plan.totalSteps = verification.steps().size();
+                plan.current = null;
+                plan.currentTask = null;
+                assignNext(bot, plan);
+                return;
+            }
+            if (!verification.success() || !verification.steps().isEmpty()) {
+                String reason = verification.success()
+                        ? "goal_incomplete_after_verification: remaining=" + verification.describeSteps()
+                        : "goal_verification_failed:" + String.join(",", verification.unresolved());
+                activePlans.remove(bot.getUuid());
+                lastSettledState.put(bot.getUuid(), TaskState.FAILED);
+                lastGoalFailTick.put(bot.getUuid(), bot.getServer().getTicks());
+                BotLog.warn(io.github.zoyluo.aibot.log.LogCategory.TASK, bot, "goal_failed",
+                        "goal", plan.goal, "reason", reason);
+                recordGoalFailure(bot, plan.goal, reason);
+                TaskManager.INSTANCE.recordFailure(bot, "goal", reason, bot.getServer().getTicks());
+                report(bot, humanGoalFailure(reason));
+                userGoal.remove(bot.getUuid());
+                advanceQueue(bot);
+                return;
             }
             activePlans.remove(bot.getUuid());
+            lastSettledState.put(bot.getUuid(), TaskState.COMPLETED);
             BotLog.task(bot, "goal_completed", "goal", plan.goal);
             io.github.zoyluo.aibot.memory.EpisodeLog.INSTANCE.record(bot,
                     io.github.zoyluo.aibot.memory.EpisodeLog.Type.GOAL_DONE, bot.getBlockPos(), goalLabel(plan.goal));
@@ -292,6 +314,7 @@ public final class GoalExecutor {
         Optional<Task> task = stepToTask(bot, step);
         if (task.isEmpty()) {
             activePlans.remove(bot.getUuid());
+            lastSettledState.put(bot.getUuid(), TaskState.FAILED);
             report(bot, "目标步骤无法执行:" + step.describe());
             BotLog.warn(io.github.zoyluo.aibot.log.LogCategory.TASK, bot, "goal_step_unmapped", "step", step.describe());
             return;
@@ -359,6 +382,7 @@ public final class GoalExecutor {
         // 死亡闸:连续 3 次无进展 replan,或终生 12 次(防"挖一点卡一点"无限磨),或 replan 关闭 → 判死。
         if (plan.replanCount >= 3 || plan.lifetimeReplans >= 12 || !AIBotConfig.get().goal().replanOnFailureEnabled()) {
             activePlans.remove(bot.getUuid());
+            lastSettledState.put(bot.getUuid(), TaskState.FAILED);
             lastGoalFailTick.put(bot.getUuid(), server.getTicks());
             BotLog.warn(io.github.zoyluo.aibot.log.LogCategory.TASK, bot, "goal_failed", "goal", plan.goal, "reason", reason);
             recordGoalFailure(bot, plan.goal, reason);
@@ -372,6 +396,7 @@ public final class GoalExecutor {
         BotLog.task(bot, "goal_replan", "goal", plan.goal, "reason", reason, "steps", fresh.describeSteps(), "unresolved", fresh.unresolved());
         if (!fresh.success() || fresh.steps().isEmpty()) {
             activePlans.remove(bot.getUuid());
+            lastSettledState.put(bot.getUuid(), TaskState.FAILED);
             report(bot, fresh.success() ? "目标已停止:没有可继续执行的步骤。" : "目标重规划失败:" + String.join(", ", fresh.unresolved()));
             return;
         }
@@ -379,6 +404,7 @@ public final class GoalExecutor {
         // 重试只会原样再失败一次(实测#9 的 replan 风暴根因)。直接判失败,交大脑/玩家换思路。
         if (plan.current != null && plan.current.equals(fresh.steps().get(0)) && isHardFailure(reason) && !madeProgress) {
             activePlans.remove(bot.getUuid());
+            lastSettledState.put(bot.getUuid(), TaskState.FAILED);
             lastGoalFailTick.put(bot.getUuid(), server.getTicks());
             BotLog.warn(io.github.zoyluo.aibot.log.LogCategory.TASK, bot, "goal_failed",
                     "goal", plan.goal, "reason", "replan_same_step:" + reason);

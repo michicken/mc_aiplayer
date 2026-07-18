@@ -166,10 +166,10 @@ public final class SmeltTask extends AbstractTask {
             }
         }
         if (next == null) {
-            if (collected > 0) {
+            if (collected >= targetCount) {
                 complete();
             } else {
-                fail("no_raw_food");
+                fail("no_raw_food collected=" + collected + "/" + targetCount);
             }
             return false;
         }

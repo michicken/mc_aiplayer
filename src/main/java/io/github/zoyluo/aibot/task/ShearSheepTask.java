@@ -16,7 +16,7 @@ import java.util.OptionalInt;
 /**
  * 剪羊毛:拿剪刀走到最近的没剪过的成年羊旁边右键剪(原版 interactMob 掉羊毛),顺手捡走。
  * 要羊毛做床/旗帜的标准来源;需要背包里有剪刀(shears,2 铁锭 craft)。
- * best-effort:剪到 ≥1 只就算完成,一只没剪到才失败(MilkCowTask 同款语义)。
+ * 只有剪够请求数量才完成；部分结果随失败原因回报，供大脑换区继续找羊。
  */
 public final class ShearSheepTask extends AbstractTask {
     private static final double SEARCH = 32.0D;
@@ -106,11 +106,7 @@ public final class ShearSheepTask extends AbstractTask {
     }
 
     private void finishOrFail(String reason) {
-        if (sheared > 0) {
-            complete();
-        } else {
-            fail(reason);
-        }
+        fail(reason + " sheared=" + sheared + "/" + target);
     }
 
     @Override
