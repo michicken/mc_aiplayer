@@ -183,8 +183,13 @@ public final class ToolRegistry {
                 "speak", "finish", "scan_surroundings", "inventory", "craft", "eat",
                 "smart_navigate", "smart_combat", "mine_ore", "achieve_goal", "gather",
                 "harvest_crop", "provision_food", "build_house", "goal_status",
-                "get_task_status", "stop", "abort_task", "emote"));
+                "get_task_status", "emote"));
         String text = intent == null ? "" : intent.toLowerCase(java.util.Locale.ROOT);
+
+        if (containsAny(text, "停", "停止", "取消", "别", "改", "换", "放弃", "abort", "stop", "cancel")) {
+            selected.add("stop");
+            selected.add("abort_task");
+        }
 
         if (containsAny(text, "给我", "递", "交给", "扔", "丢", "give", "drop", "toss")) {
             selected.add("give_item");
@@ -594,7 +599,7 @@ public final class ToolRegistry {
         register("scan_surroundings", "God-view scan of surroundings: nearest lava/water/ores/trees/chests/furnaces/beds, hostile mobs and ground items with coordinates and distances (blocks radius 12, entities 24). ALWAYS call this FIRST before answering any question about what is nearby (附近有没有X/周围有什么/跳进旁边的X) — never claim something is not nearby without scanning.", objectSchema().build(), (bot, args) ->
                 ok(io.github.zoyluo.aibot.perception.PerceptionCollector.scanReport(bot)));
 
-        register("speak", "让观众听到你说的话(触发语音 TTS)。每次一句短话(≤30中文字),超长自动截断。需要说话给观众/主人听时用它:回复、吐槽、庆祝、挑衅、互动等。plain text 短句也会自动 TTS,但 speak 是显式控制,效果更好。", objectSchema()
+        register("speak", "让观众听到你说的话(触发语音 TTS)。每次一句短话(≤30中文字),超长自动截断。需要说话给观众/主人听时用它:回复、吐槽、庆祝、挑衅、互动等。普通文本只显示面板，不会朗读。", objectSchema()
                 .property("message", stringSchema("要说什么,一句短话"))
                 .required("message")
                 .build(), (bot, args) -> {
@@ -609,8 +614,8 @@ public final class ToolRegistry {
             return ok("said");
         });
 
-        register("finish", "End your current turn. Call ONCE after all tool calls for this step are done, with a one-line summary spoken to the audience. Until finish() is called, your turn is not considered complete and the player cannot send a new instruction — so do not skip it. NEVER call finish as your first action — only after at least one other tool (speak/come_here/gather/etc).", objectSchema()
-                .property("summary", stringSchema("one-line summary of what just happened, ≤30 Chinese chars, spoken to audience"))
+        register("finish", "End the current turn and say summary aloud. Call it once after an action or answer. For a simple question, finish may be the only tool call. Use a natural short spoken sentence; do not repeat a previous speak message.", objectSchema()
+                .property("summary", stringSchema("natural spoken one-line summary, ≤30 Chinese chars"))
                 .required("summary")
                 .build(), (bot, args) -> {
             String summary = requiredString(args, "summary");

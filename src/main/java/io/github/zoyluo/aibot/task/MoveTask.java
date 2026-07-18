@@ -1,8 +1,6 @@
 package io.github.zoyluo.aibot.task;
 
 import io.github.zoyluo.aibot.action.ActionResult;
-import io.github.zoyluo.aibot.action.BlockMiner;
-import io.github.zoyluo.aibot.action.DigNav;
 import io.github.zoyluo.aibot.entity.AIPlayerEntity;
 import io.github.zoyluo.aibot.log.BotLog;
 import io.github.zoyluo.aibot.pathfinding.Standability;
@@ -15,14 +13,9 @@ import net.minecraft.world.Heightmap;
 import java.util.UUID;
 
 public final class MoveTask extends AbstractTask {
-    private static final int DIG_NO_PROGRESS_LIMIT = 200; // 挖掘式直行 10s 没破块/没迈步 → 放弃
-    private static final int DIG_MAX_ELAPSED = 2400;
-    private static final double ARRIVE_SQUARED = 4.0D;     // 挖掘式到 goal 2 格内即视为到达
-
     // —— 分段中继导航(绕大湖/大障碍)——
-    // 失败机理(real_nav_far 实测):目标 120 格外隔着大湖。A* 不走水柱(深水不可站立、挖掘阶段
-    // 也不挖含流体方块),WALK_MAX_NODES=10k 的预算又不够搜出整条绕湖长路 → 寻路"彻底失败" →
-    // 旧逻辑直接降级挖掘式直行 → DigNav 朝目标硬挖、一头挖进湖里 → touchingWater 熔断 fail。
+    // 失败机理(real_nav_far 实测):目标 120 格外隔着大湖。单次 A* 的预算不够搜索整条绕湖长路，
+    // 若直接朝目标挖会毁掉地形并可能进水。这里把长距离移动拆成安全的陆地中继段。
     // 解法:把"一步直达"拆成"多段经停"——每段 ≤40 格,A* 预算内必然可解;中继点沿 bot→goal
     // 方位角左右扫偏角,只选"干燥可站"的落脚点,湖是绕出来的,不是挖出来的。
     private static final int WAYPOINT_MAX_HOPS = 6;             // 中继跳数上限:防湖湾地形里无限折返
@@ -35,9 +28,6 @@ public final class MoveTask extends AbstractTask {
     private final UUID targetPlayerUuid;
     private final String targetPlayerName;
     private BlockPos resolvedGoal;
-    private boolean digging;                               // 纯寻路走不通 → 降级为挖掘式直行
-    private final BlockMiner miner = new BlockMiner();
-    private int digLastProgressTick;
     private BlockPos waypoint;                             // 经停模式:当前中继点;null = 直奔最终 goal
     private int waypointHops;                              // 已采用中继点次数(上限 WAYPOINT_MAX_HOPS)
     private int nextPlayerRepathTick;
@@ -71,9 +61,9 @@ public final class MoveTask extends AbstractTask {
     @Override
     public String describe() {
         if (targetPlayerUuid != null) {
-            return (digging ? "Digging toward " : "Moving to ") + targetPlayerName;
+            return "Moving to " + targetPlayerName;
         }
-        return (digging ? "Digging to " : "Walking to ") + compact(goal);
+        return "Walking to " + compact(goal);
     }
 
     @Override
@@ -82,12 +72,6 @@ public final class MoveTask extends AbstractTask {
             return 1.0D;
         }
         return Math.min(0.95D, elapsed / Math.max(20.0D, startDistance * 12.0D));
-    }
-
-    @Override
-    public boolean isWaiting() {
-        // 挖掘式直行时 bot 站着挖、位置基本不变 → 视为 waiting,让 StuckWatcher 不误判(由本任务看门狗兜底)。
-        return digging;
     }
 
     @Override
@@ -105,34 +89,30 @@ public final class MoveTask extends AbstractTask {
             return;
         }
         nextPlayerRepathTick = 20;
-        startWalkOrDig(bot);
+        startNavigation(bot);
     }
 
     @Override
     protected void onResume(AIPlayerEntity bot) {
-        digging = false;
-        startWalkOrDig(bot);
+        startNavigation(bot);
     }
 
-    private void startWalkOrDig(AIPlayerEntity bot) {
+    private void startNavigation(AIPlayerEntity bot) {
         ActionResult result = bot.getActionPack().startPathTo(goal);
         if (result.isFailed()) {
             if (isWaterGoal(bot)) {
-                // 水面目标不能降级成 DigNav。挖掘直行只会钻进湖底，然后被安全网拉回岸边。
-                digging = false;
+                // 水面目标只允许正常水路；路径暂时不可得时等待后重试。
                 waypoint = null;
                 resolvedGoal = null;
                 nextWaterRetryTick = Math.max(nextWaterRetryTick, elapsed + 40);
                 BotLog.action(bot, "move_water_path_retry", "goal", compact(goal), "reason", result.reason());
                 return;
             }
-            // 中继优先于挖掘降级:挖掘式直行是"最后手段"——它无视地形朝坐标硬挖,目标隔水时
-            // 必然一路挖进湖里触发溺水熔断、任务必败。寻路失败先试分段中继(走得通就不动土),
-            // 中继也选不出落脚点才退回挖掘式直行。
+            // 使用陆地中继绕大障碍；没有可行路线时明确结束，绝不盲目挖穿世界。
             if (tryWaypointRelay(bot, "path_start:" + result.reason())) {
                 return;
             }
-            beginDigging(bot, result.reason()); // 纯寻路一开始就失败(被墙/SEARCH_LIMIT)→ 直接挖掘式直行
+            failNoSafeRoute(bot, result.reason());
             return;
         }
         waypoint = null; // 直达寻路成功 → 不需要经停(也清掉 resume 残留的旧中继)
@@ -141,7 +121,6 @@ public final class MoveTask extends AbstractTask {
 
     @Override
     protected void onAbort(AIPlayerEntity bot) {
-        miner.cancel(bot);
         bot.getActionPack().stopAll();
     }
 
@@ -155,7 +134,6 @@ public final class MoveTask extends AbstractTask {
                 return;
             }
             if (bot.distanceTo(playerTarget) <= 3.0D) {
-                miner.cancel(bot);
                 bot.getActionPack().stopAll();
                 complete();
                 return;
@@ -165,14 +143,8 @@ public final class MoveTask extends AbstractTask {
                 retargetPlayer(bot, liveGoal);
                 return;
             }
-        } else if (bot.getBlockPos().getSquaredDistance(currentGoal()) <= 2.25D
-                || (digging && bot.getBlockPos().getSquaredDistance(goal) <= ARRIVE_SQUARED)) {
-            miner.cancel(bot);
+        } else if (bot.getBlockPos().getSquaredDistance(currentGoal()) <= 2.25D) {
             complete();
-            return;
-        }
-        if (digging) {
-            digTick(bot);
             return;
         }
         // 经停模式:正赶往中继点。到达中继点 ≠ 任务完成,在 waypointTick 里换乘(重新直奔最终 goal)。
@@ -180,19 +152,22 @@ public final class MoveTask extends AbstractTask {
             waypointTick(bot);
             return;
         }
-        // 纯寻路模式:寻路执行器空闲(到不了)→ 降级挖掘式直行,而不是直接 did_not_reach 卡死。
+        // 路径执行器提前空闲意味着当前路线已经失效。先尝试中继绕行；不能得到一条完整路径时
+        // 宁可明确失败，也不朝目标坐标盲挖。后者会破坏建筑并把 bot 送进水体或洞穴。
         if (bot.getActionPack().isPathExecutorIdle() && elapsed > 5) {
             if (isWaterGoal(bot)) {
                 if (elapsed >= nextWaterRetryTick) {
                     nextWaterRetryTick = elapsed + 40;
-                    startWalkOrDig(bot);
+                    startNavigation(bot);
                 }
                 if (elapsed > 1200) {
                     fail("move_water_path_timeout");
                 }
                 return;
             }
-            beginDigging(bot, "path_idle");
+            if (!tryWaypointRelay(bot, "path_idle")) {
+                failNoSafeRoute(bot, "path_idle");
+            }
             return;
         }
         if (elapsed > 1200) {
@@ -200,24 +175,14 @@ public final class MoveTask extends AbstractTask {
         }
     }
 
-    private void beginDigging(AIPlayerEntity bot, String reason) {
-        digging = true;
-        waypoint = null; // 互斥:进挖掘模式即放弃经停
-        digLastProgressTick = elapsed;
-        bot.getActionPack().stopAll(); // 清掉寻路状态,改由 DigNav 驱动
-        BotLog.action(bot, "move_dig_fallback", "goal", compact(goal), "reason", reason);
-    }
-
     private void retargetPlayer(AIPlayerEntity bot, BlockPos liveGoal) {
-        miner.cancel(bot);
         bot.getActionPack().stopAll();
         goal = liveGoal.toImmutable();
         resolvedGoal = null;
-        digging = false;
         waypoint = null;
         waypointHops = 0;
         nextPlayerRepathTick = elapsed + 20;
-        startWalkOrDig(bot);
+        startNavigation(bot);
         BotLog.action(bot, "move_player_retarget", "player", targetPlayerName, "goal", compact(goal));
     }
 
@@ -247,47 +212,6 @@ public final class MoveTask extends AbstractTask {
                 || world.getFluidState(goal.down()).isIn(FluidTags.WATER);
     }
 
-    private void digTick(AIPlayerEntity bot) {
-        // 安全熔断(实测致死根因):挖掘式直行会朝坐标**挖穿一切**,最危险。一旦把 bot 挖进水下(溺水)
-        // 或挖进怪堆(正在挨打),立即放弃,交生存层(NavSafetyNet/DangerWatcher)或大脑处理——
-        // 绝不一路挖到淹死/被围殴致死。
-        // 病根:大脑 move_to 盲目挖向坐标 → digStep 一路挖进水域 → bot 头没入水中;NavSafetyNet 每 tick
-        // 上浮换气,但下一 tick 本任务又 digStep 把 bot 挖回水里 → "上浮↔挖回"活锁几分钟、零进展,
-        // 最终溺水/被怪打死(实测两次死亡)。在这里 submerged/挨打即熔断,从根上打破活锁、保命第一。
-        // 熔断提前:脚一沾水就停(原来等头没入 submerged 才停——那时已半淹,安全网要拖很久才能救上岸;
-        // 实测 real_nav_far 挖到湖边 73t 即灌水)。touchingWater 时水还没过头,立即停手交安全网上岸。
-        if (bot.isTouchingWater()) {
-            miner.cancel(bot);
-            // 熔断保命 × 中继绕行的分工:熔断只负责"别淹死",不负责"把路走完"——沾水说明挖掘直行
-            // 正把 bot 往水体里送,继续挖必然重演活锁。所以 fail 之前先尝试分段中继:挑一个偏离水体
-            // 的干燥落脚点重新寻路绕行(湖只能绕,不能挖)。中继也找不到(四面环水/跳数耗尽)才维持
-            // 原语义 fail("move_dig_drowning"),交安全网上岸、大脑另谋出路。
-            if (tryWaypointRelay(bot, "dig_drowning")) {
-                return;
-            }
-            fail("move_dig_drowning");
-            return;
-        }
-        if (bot.hurtTime > 0) {
-            miner.cancel(bot);
-            fail("move_dig_under_attack");
-            return;
-        }
-        if (elapsed > DIG_MAX_ELAPSED) {
-            miner.cancel(bot);
-            fail("move_dig_timeout");
-            return;
-        }
-        if (elapsed - digLastProgressTick > DIG_NO_PROGRESS_LIMIT) {
-            miner.cancel(bot);
-            fail("move_dig_no_progress"); // 挖不动/受阻(如四面岩浆)→ 交还,交生存层/大脑
-            return;
-        }
-        if (DigNav.digStep(bot, miner, goal)) {
-            digLastProgressTick = elapsed;
-        }
-    }
-
     // ==================== 分段中继导航 ====================
 
     /**
@@ -313,8 +237,14 @@ public final class MoveTask extends AbstractTask {
         if (tryWaypointRelay(bot, "relay_next:" + result.reason())) {
             return;
         }
-        // 中继耗尽 → 走原失败路径(降级挖掘式直行,由其熔断/看门狗定生死)
-        beginDigging(bot, "waypoint_exhausted");
+        failNoSafeRoute(bot, "waypoint_exhausted");
+    }
+
+    private void failNoSafeRoute(AIPlayerEntity bot, String reason) {
+        bot.getActionPack().stopAll();
+        BotLog.action(bot, "move_no_safe_route", "goal", compact(goal), "reason", reason,
+                "hops", waypointHops);
+        fail("move_no_safe_route: " + reason);
     }
 
     /**
@@ -335,7 +265,6 @@ public final class MoveTask extends AbstractTask {
         }
         waypoint = picked;
         waypointHops++;
-        digging = false; // 可能从挖掘熔断转入:经停段按纯寻路走,不再动土
         BotLog.action(bot, "move_waypoint",
                 "to", waypoint.toShortString(), "hop", waypointHops, "goal", compact(goal), "reason", reason);
         return true;

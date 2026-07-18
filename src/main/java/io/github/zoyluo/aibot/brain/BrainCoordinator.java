@@ -487,6 +487,10 @@ public final class BrainCoordinator {
                 BotRuntimeOptions.INSTANCE.memoryToolsEnabled(bot),
                 brainConfig.coordinationToolsEnabled(),
                 conversation.lastToolIntent);
+        BotLog.comm(bot, "tool_surface_selected",
+                "intent", trunc(conversation.lastToolIntent, 80),
+                "count", toolsSnapshot.size(),
+                "tools", toolsSnapshot.stream().map(ToolDefinition::name).collect(java.util.stream.Collectors.joining(",")));
         trace(bot, "-> 思考中(第" + (conversation.turnsInCurrentRequest + 1) + "轮)");
         // 捕获提交时代数:被打断(abort)后 generation++,这笔在途请求的响应/错误回来即作废,
         // 不会污染打断后的新对话,也不会把新请求的 busy 误复位。回调经 server.execute 已在主线程。
