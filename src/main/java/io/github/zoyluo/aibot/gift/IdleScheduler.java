@@ -19,7 +19,7 @@ import java.util.concurrent.ThreadLocalRandom;
  * 形式(用户拍板"确定性池+偶尔唠嗑"):
  *  - 连续完全空闲 idleAfterSec(默认60s)后,从 pools["idle"] 随机抽一个动作执行,复用
  *    GiftDispatcher 的动作机制(say 词条=零 token 嘴上互动;wander/gather/mine/fish=小事干);
- *  - 每 idleChatterIntervalSec(默认300s,0=关)才允许一次大脑唠嗑(speak 一句就 finish,1 轮 API);
+ *  - 每 idleChatterIntervalSec(默认300s,0=关)才允许一次大脑唠嗑(finish 直接念 summary,1 轮 API);
  *  - 空闲池任务失败**静默**(markSilentFailure):钓鱼没竿之类的失败绝不唤醒大脑烧 token;
  *  - 主人消息/礼物任务随时顶掉空闲任务(TaskManager.assign 先 abort,不产生失败记录)。
  *
@@ -81,7 +81,7 @@ public final class IdleScheduler {
             lastNonIdleMs = now;
             BotLog.comm(bot, "idle_chatter_feed");
             BrainCoordinator.INSTANCE.handleMessage(bot, "system:idle",
-                    "你现在完全空闲。结合 Current state 里看到的环境或你正在想的事,speak 一句有意思的话给观众(≤30字),然后立刻 finish。不开任务,不调其他工具。");
+                    "你现在完全空闲。结合 Current state 里的环境，只调用一次 finish(summary=一句自然、有意思的中文短话，≤30字)。不要调用 speak，不开任务，不调其他工具。");
             return;
         }
         // 抽池干小事

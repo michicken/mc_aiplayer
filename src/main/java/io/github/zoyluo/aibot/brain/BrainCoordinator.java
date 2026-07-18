@@ -95,6 +95,7 @@ public final class BrainCoordinator {
         conversation.fromOwner = fromOwner;
         conversation.lastToolIntent = text;
         conversation.actionDispatchedThisTurn = false;
+        conversation.modelSpeechGate.reset();
         if (!senderName.contains(":")) {
             // 真人消息(gift:/danmaku:/system: 都带冒号前缀,玩家名不含冒号)记为"最初的完整要求",
             // task_done_wake 时回灌——治复合指令"先A再B"里 B 靠被 trim 的历史回忆导致只做一半。
@@ -330,7 +331,13 @@ public final class BrainCoordinator {
      */
     public void notifyTaskSettled(AIPlayerEntity bot) {
         BotConversation conversation = conversations.get(bot.getUuid());
-        if (conversation == null || !conversation.busy || conversation.inFlight) {
+        if (conversation == null) {
+            return;
+        }
+        // A completed/failed task is a real state transition, so a final report may speak even if
+        // the same request already voiced a short acknowledgement before dispatching the task.
+        conversation.modelSpeechGate.reset();
+        if (!conversation.busy || conversation.inFlight) {
             return;
         }
         scheduleContinuation(bot, conversation, 0);
@@ -357,6 +364,7 @@ public final class BrainCoordinator {
                 return false;
             }
             conversation.busy = true;
+            conversation.modelSpeechGate.reset();
         }
         if (conversation.history.isEmpty()) {
             conversation.history.add(ChatMessage.system(systemPrompt(bot.getGameProfile().getName())));
@@ -465,17 +473,23 @@ public final class BrainCoordinator {
     }
 
     /** Applies only to model-authored speak/finish text; internal safety and system TTS bypass it. */
-    String reviewModelSpeech(AIPlayerEntity bot, String text, String source) {
+    ModelSpeechDecision reviewModelSpeech(AIPlayerEntity bot, String text, String source) {
         BotConversation conversation = conversations.get(bot.getUuid());
         if (conversation == null) {
-            return text;
+            return new ModelSpeechDecision(true, text, "");
+        }
+        if (!conversation.modelSpeechGate.reserve()) {
+            BotLog.comm(bot, "duplicate_model_speech_blocked", "source", source, "text", trunc(text, 100));
+            trace(bot, "! 本轮已经说过一句，拒绝重复口播");
+            return new ModelSpeechDecision(false, "",
+                    "already_spoke_this_turn: 本轮已经有一条有声口播。不要再调用 speak；现在调用 finish 收尾，finish 不会重复朗读。");
         }
         FactualityGate.SpeechDecision decision = FactualityGate.reviewSpeech(
                 factualityContext(bot, conversation), text);
         if (decision.rewritten()) {
             logPrematureCompletionRewrite(bot, source, text, decision.speech());
         }
-        return decision.speech();
+        return new ModelSpeechDecision(true, decision.speech(), "");
     }
 
     FactualityGate.FinishDecision reviewModelFinish(AIPlayerEntity bot, String summary) {
@@ -494,6 +508,19 @@ public final class BrainCoordinator {
             logPrematureCompletionRewrite(bot, "finish", summary, decision.speech());
         }
         return decision;
+    }
+
+    /** Reserves the one audible model sentence for finish; false means an earlier speak already used it. */
+    boolean reserveModelFinishSpeech(AIPlayerEntity bot) {
+        BotConversation conversation = conversations.get(bot.getUuid());
+        if (conversation == null) {
+            return true;
+        }
+        boolean reserved = conversation.modelSpeechGate.reserve();
+        if (!reserved) {
+            BotLog.comm(bot, "finish_tts_suppressed_after_speak");
+        }
+        return reserved;
     }
 
     /** Called after a successful mutating/action tool result so verbal-only finish cannot pass. */
@@ -592,6 +619,7 @@ public final class BrainCoordinator {
             conversation.busy = false;
             conversation.inFlight = false;
             conversation.finishSummary = null;
+            conversation.modelSpeechGate.reset();
         }
         BotLog.comm(bot, "turn_finished_by_finish_tool");
         trace(bot, "OK 玩家可发下一条");
@@ -659,6 +687,7 @@ public final class BrainCoordinator {
             conversation.pendingUserMessages.clear();
             conversation.uncommittedTools = 0;
             conversation.continuationTaskPolls = 0;
+            conversation.modelSpeechGate.reset();
         }
         io.github.zoyluo.aibot.goal.GoalExecutor.INSTANCE.clear(bot);
         LongRunningIntentManager.INSTANCE.clear(bot);
@@ -719,6 +748,7 @@ public final class BrainCoordinator {
             conversation.busy = false;
             conversation.inFlight = false;
             conversation.pendingUserMessages.clear();
+            conversation.modelSpeechGate.reset();
         }
         awaitingTask.remove(bot.getUuid());
         BotLog.comm(bot, "brain_aborted_by_user", "generation", conversation.generation);
@@ -878,6 +908,9 @@ public final class BrainCoordinator {
                 return message.isBlank() || "said".equals(message) || "turn_closed".equals(message)
                         ? null
                         : "OK " + trunc(message, 50);
+            }
+            if (message.startsWith("skipped_after_finish")) {
+                return null;
             }
             return "!! " + trunc(message.isBlank() ? content : message, 90);
         } catch (RuntimeException e) {
@@ -1174,7 +1207,7 @@ public final class BrainCoordinator {
 
                 只做当前消息真正要求的事。问候、吐槽和问状态时只简短回答；不要无故播报、不要复述用户的话、不要说“收到/正在为您/我将”。有正在跑的任务时，主人只是聊天或问进度并不代表取消任务；只有明确说停、改、换目标才停止。
 
-                要让直播间听到的话用 speak，一次一句，短而有情绪；纯问答直接 finish，别再用 speak 重复同一句。每轮结束都调用 finish。finish 只关闭当前对话轮次，绝不代表行动或任务已经完成。派发了持续任务、目标或导航后就立即 finish 并等待系统通知，此时只能说“开始了/还在做”，绝不能说“完成了/拿到了/搞定了”。只有系统明确给出任务状态 COMPLETED 才能说完成，失败要如实说卡在哪里。
+                每个对话轮最多一句有声短话：要么调用一次 speak 后再用 finish 静默收尾，要么直接让 finish 念 summary；绝不连续 speak，也不在 speak 后重复同义 summary。finish 只关闭当前对话轮次，绝不代表行动或任务已经完成。派发了持续任务、目标或导航后就立即 finish 并等待系统通知，此时只能说“开始了/还在做”，绝不能说“完成了/拿到了/搞定了”。只有系统明确给出任务状态 COMPLETED 才能说完成，失败要如实说卡在哪里。
 
                 移动只用 smart_navigate，战斗只用 smart_combat；它们会处理绕路、跳跃、普通障碍和安全。成品、工具、盔甲和锭优先 achieve_goal；矿石用 mine_ore；木石等基础材料用 gather。回答“附近有没有/在哪里”之前先 scan_surroundings。空间指代“那里/标记处”使用 use_marker，位置不明就问一句，不要猜。
 
@@ -1199,6 +1232,7 @@ public final class BrainCoordinator {
         private String lastUserRequest; // 最近一条真人消息原文(≤120字):task_done_wake 回灌,治复合指令只做一半
         private String lastToolIntent = ""; // 最近一条请求:用于给 Step 裁剪本轮工具面，避免 124 个工具互相干扰
         private boolean actionDispatchedThisTurn; // 新用户消息时清零；成功行动工具置 true，防口头答应后直接 finish
+        private final TurnSpeechGate modelSpeechGate = new TurnSpeechGate(); // 每个真实对话轮最多一句模型 TTS
         private final Deque<String[]> pendingUserMessages = new ArrayDeque<>(); // 在途期间的新消息,本轮结束立即接续处理
         private int lastPromptTokens;
         private int lastCompletionTokens;
@@ -1207,5 +1241,8 @@ public final class BrainCoordinator {
     }
 
     public record BrainStatus(boolean busy, int historySize, int promptTokens, int completionTokens, int cacheHitTokens) {
+    }
+
+    record ModelSpeechDecision(boolean allowed, String speech, String reason) {
     }
 }

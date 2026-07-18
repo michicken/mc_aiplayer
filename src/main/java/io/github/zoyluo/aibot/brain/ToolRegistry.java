@@ -599,7 +599,7 @@ public final class ToolRegistry {
         register("scan_surroundings", "God-view scan of surroundings: nearest lava/water/ores/trees/chests/furnaces/beds, hostile mobs and ground items with coordinates and distances (blocks radius 12, entities 24). ALWAYS call this FIRST before answering any question about what is nearby (附近有没有X/周围有什么/跳进旁边的X) — never claim something is not nearby without scanning.", objectSchema().build(), (bot, args) ->
                 ok(io.github.zoyluo.aibot.perception.PerceptionCollector.scanReport(bot)));
 
-        register("speak", "让观众听到你说的话(触发语音 TTS)。每次一句短话(≤30中文字),超长自动截断。需要说话给观众/主人听时用它:回复、吐槽、庆祝、挑衅、互动等。普通文本只显示面板，不会朗读。", objectSchema()
+        register("speak", "让观众听到你说的一句短话(触发 TTS,≤30中文字)。每个对话轮最多成功一次；说完立刻调用 finish 收尾，不要再 speak，finish 也不会重复朗读。普通文本只显示面板。", objectSchema()
                 .property("message", stringSchema("要说什么,一句短话"))
                 .required("message")
                 .build(), (bot, args) -> {
@@ -610,12 +610,16 @@ public final class ToolRegistry {
             if (message.isBlank()) {
                 return fail("empty_message");
             }
-            message = BrainCoordinator.INSTANCE.reviewModelSpeech(bot, message, "speak");
-            BrainCoordinator.INSTANCE.triggerSpeech(bot, message);
+            BrainCoordinator.ModelSpeechDecision decision =
+                    BrainCoordinator.INSTANCE.reviewModelSpeech(bot, message, "speak");
+            if (!decision.allowed()) {
+                return fail(decision.reason());
+            }
+            BrainCoordinator.INSTANCE.triggerSpeech(bot, decision.speech());
             return ok("said");
         });
 
-        register("finish", "Close the current CONVERSATION TURN and say one factual summary aloud. This does NOT mark an assigned action or task complete. For a physical command, first dispatch a real action tool; while its task is RUNNING say only that it started/is ongoing. Claim completion only after the system reports COMPLETED. For a simple question, finish may be the only tool call.", objectSchema()
+        register("finish", "Close the current CONVERSATION TURN. If no speak was used this turn, say the factual summary aloud; after a speak it closes silently so the sentence is not repeated. This does NOT mark an action/task complete. For a physical command first dispatch a real action; while RUNNING say only started/ongoing. Claim completion only after system status COMPLETED.", objectSchema()
                 .property("summary", stringSchema("natural spoken one-line summary of VERIFIED current status, ≤30 Chinese chars"))
                 .required("summary")
                 .build(), (bot, args) -> {
@@ -630,7 +634,9 @@ public final class ToolRegistry {
             if (!decision.allowed()) {
                 return fail(decision.reason());
             }
-            BrainCoordinator.INSTANCE.triggerSpeech(bot, decision.speech());
+            if (BrainCoordinator.INSTANCE.reserveModelFinishSpeech(bot)) {
+                BrainCoordinator.INSTANCE.triggerSpeech(bot, decision.speech());
+            }
             // 标记 turn 完成 → BrainCoordinator 允许下一条用户消息
             BrainCoordinator.INSTANCE.markTurnFinished(bot);
             return ok("turn_closed");

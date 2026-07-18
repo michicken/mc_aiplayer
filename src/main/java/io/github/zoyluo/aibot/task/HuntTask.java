@@ -15,6 +15,8 @@ import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 
 import java.util.Comparator;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -36,6 +38,7 @@ public final class HuntTask extends AbstractTask {
     private static final int APPROACH_STUCK_TICKS = 30; // 接近时位置 1.5s 不变即判卡路障,改直线追跨台阶
     private static final int MAX_PREY_ROAMS = 10;      // 找不到猎物时漫游换片的最多次数(目标量大时多找几片)
     private static final int ROAM_DISTANCE = 32;       // 每次漫游的水平距离
+    private static final int UNREACHABLE_PREY_COOLDOWN = 200; // 卡住的同一猎物 10s 内不重新锁定
 
     // 可食用猎物及其生肉掉落(烤熟前先拿到生肉)。
     private static final Set<EntityType<?>> PREY = Set.of(
@@ -58,6 +61,7 @@ public final class HuntTask extends AbstractTask {
     private int roamStartTick;         // 本次漫游起步 tick(给寻路起步宽限,防"未出发即判到达"瞬退)
     private final BlockMiner obstacleMiner = new BlockMiner(); // 接近时挖掉眼前挡路的方块(树叶/草/泥)
     private boolean clearingObstacle;  // 正在挖挡路方块
+    private final Map<Integer, Integer> unreachablePreyUntil = new HashMap<>();
 
     public HuntTask(int targetMeat) {
         this.targetMeat = Math.max(1, targetMeat);
@@ -98,6 +102,7 @@ public final class HuntTask extends AbstractTask {
         pickupGrace = 0;
         roamCount = 0;
         clearingObstacle = false;
+        unreachablePreyUntil.clear();
         phase = Phase.ACQUIRE;
         surfaceIfUnderground(bot);
     }
@@ -220,6 +225,7 @@ public final class HuntTask extends AbstractTask {
                 int[] d = dirs[(start + i) % dirs.length];
                 BlockPos ground = findGround(world, feet.getX() + d[0] * dist, feet.getZ() + d[1] * dist);
                 if (ground == null
+                        || !TaskPositionMath.isPlausibleRoamHeight(feet.getY(), ground.getY(), dist)
                         || (avoidTrail && EpisodeMemory.INSTANCE.nearTrail(bot.getUuid(), ground, 10.0D))) {
                     continue;
                 }
@@ -328,6 +334,13 @@ public final class HuntTask extends AbstractTask {
                 // 没有可挖障碍(石墙 / 困在坑里)→ 换地方找,别死磕。
                 BotLog.action(bot, "hunt_approach_stuck", "pos", at.toShortString(),
                         "dist", (int) bot.distanceTo(target));
+                LivingEntity stuckTarget = target;
+                if (stuckTarget != null) {
+                    unreachablePreyUntil.put(stuckTarget.getId(), elapsed + UNREACHABLE_PREY_COOLDOWN);
+                    BotLog.action(bot, "hunt_prey_cooldown",
+                            "target_id", stuckTarget.getId(),
+                            "until", elapsed + UNREACHABLE_PREY_COOLDOWN);
+                }
                 target = null;
                 approachStuckPos = null;
                 if (!roamForPrey(bot)) {        // 换地方找猎物;漫游用尽才收尾
@@ -423,10 +436,12 @@ public final class HuntTask extends AbstractTask {
     }
 
     private LivingEntity nearestPrey(AIPlayerEntity bot) {
+        unreachablePreyUntil.entrySet().removeIf(entry -> entry.getValue() <= elapsed);
         Box box = bot.getBoundingBox().expand(SEARCH_RANGE);
         return bot.getServerWorld()
                 .getEntitiesByClass(LivingEntity.class, box,
-                        entity -> entity.isAlive() && entity != bot && isHuntable(entity))
+                        entity -> entity.isAlive() && entity != bot && isHuntable(entity)
+                                && !unreachablePreyUntil.containsKey(entity.getId()))
                 .stream()
                 .min(Comparator.comparingDouble(bot::distanceTo))
                 .orElse(null);

@@ -28,10 +28,14 @@ public final class ActionDispatcher {
     public List<ChatMessage> dispatch(AIPlayerEntity bot, List<ChatToolCall> calls) {
         int maxCalls = AIBotConfig.get().brain().maxToolCallsPerTurn();
         List<ChatMessage> results = new ArrayList<>();
+        boolean turnClosed = false;
         for (int index = 0; index < calls.size(); index++) {
             ChatToolCall call = calls.get(index);
             ToolDefinition.ToolResult result;
-            if (index >= maxCalls) {
+            if (turnClosed) {
+                result = new ToolDefinition.ToolResult(false,
+                        "skipped_after_finish: finish 已关闭本轮，后续工具没有执行");
+            } else if (index >= maxCalls) {
                 result = new ToolDefinition.ToolResult(false, "throttled");
             } else {
                 result = invoke(bot, call);
@@ -41,6 +45,9 @@ public final class ActionDispatcher {
             }
             BotLog.action(bot, "tool_result", "tool", call.name(), "ok", result.ok(), "message", result.message());
             results.add(ChatMessage.toolResult(call.id(), result.toToolContent(), call.name()));
+            if ("finish".equals(call.name()) && result.ok()) {
+                turnClosed = true;
+            }
         }
         return results;
     }
