@@ -249,14 +249,28 @@ public final class DeepSeekApiClient {
             }
             List<ChatToolCall> toolCalls = new ArrayList<>();
             if (message.has("tool_calls") && message.get("tool_calls").isJsonArray()) {
+                int index = 0;
                 for (JsonElement element : message.getAsJsonArray("tool_calls")) {
+                    if (!element.isJsonObject()) {
+                        continue;
+                    }
                     JsonObject call = element.getAsJsonObject();
-                    JsonObject function = call.getAsJsonObject("function");
+                    JsonObject function = call.has("function") && call.get("function").isJsonObject()
+                            ? call.getAsJsonObject("function")
+                            : call;
+                    String name = nullableString(function.get("name"));
+                    if (name == null || name.isBlank()) {
+                        continue;
+                    }
+                    String arguments = jsonArgumentString(function.get("arguments"));
                     toolCalls.add(new ChatToolCall(
-                            nullableString(call.get("id")),
-                            nullableString(function.get("name")),
-                            nullableString(function.get("arguments"))));
+                            fallbackToolCallId(nullableString(call.get("id")), index++),
+                            name,
+                            arguments));
                 }
+            }
+            if (!toolCalls.isEmpty() && (finishReason == null || finishReason.isBlank())) {
+                finishReason = "tool_calls";
             }
             JsonObject usage = root.has("usage") && root.get("usage").isJsonObject() ? root.getAsJsonObject("usage") : new JsonObject();
             int promptTokens = intField(usage, "prompt_tokens");
@@ -279,6 +293,17 @@ public final class DeepSeekApiClient {
 
     private static String nullableString(JsonElement element) {
         return element == null || element.isJsonNull() ? null : element.getAsString();
+    }
+
+    private static String jsonArgumentString(JsonElement element) {
+        if (element == null || element.isJsonNull()) {
+            return "{}";
+        }
+        return element.isJsonPrimitive() ? element.getAsString() : element.toString();
+    }
+
+    private static String fallbackToolCallId(String id, int index) {
+        return id == null || id.isBlank() ? "step_call_" + index : id;
     }
 
     /**

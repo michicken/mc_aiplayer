@@ -163,6 +163,99 @@ public final class ToolRegistry {
                 .toList();
     }
 
+    /**
+     * Step can call tools reliably, but giving a fast model the full 124-tool catalogue for a
+     * one-sentence livestream request makes it choose a visually similar but wrong action. Keep
+     * a small always-useful surface and reveal specialist actions only when the user's wording
+     * asks for that domain. Expert mode intentionally keeps the complete catalogue.
+     */
+    public List<ToolDefinition> toolsForIntent(AIBotConfig.Brain config,
+                                                boolean exposeLowLevelTools,
+                                                boolean memoryToolsEnabled,
+                                                boolean coordinationToolsEnabled,
+                                                String intent) {
+        List<ToolDefinition> available = tools(config, exposeLowLevelTools, memoryToolsEnabled, coordinationToolsEnabled);
+        if (config.advancedToolsExposed()) {
+            return available;
+        }
+
+        Set<String> selected = new HashSet<>(Set.of(
+                "speak", "finish", "scan_surroundings", "inventory", "craft", "eat",
+                "smart_navigate", "smart_combat", "mine_ore", "achieve_goal", "gather",
+                "harvest_crop", "provision_food", "build_house", "goal_status",
+                "get_task_status", "stop", "abort_task", "emote"));
+        String text = intent == null ? "" : intent.toLowerCase(java.util.Locale.ROOT);
+
+        if (containsAny(text, "给我", "递", "交给", "扔", "丢", "give", "drop", "toss")) {
+            selected.add("give_item");
+            selected.add("drop_item");
+        }
+        if (containsAny(text, "睡", "床", "sleep", "夜")) selected.add("sleep");
+        if (containsAny(text, "钓", "fish")) selected.add("fish");
+        if (containsAny(text, "熔", "烧", "炉", "smelt", "furnace")) selected.add("smelt");
+        if (containsAny(text, "交易", "村民", "trade")) selected.add("trade");
+        if (containsAny(text, "牛奶", "挤奶", "milk")) selected.add("milk_cow");
+        if (containsAny(text, "剪羊", "羊毛", "shear")) selected.add("shear_sheep");
+        if (containsAny(text, "驯服", "宠物", "tame", "喂")) {
+            selected.add("tame");
+            selected.add("pet_command");
+            selected.add("feed_pet");
+        }
+        if (containsAny(text, "船", "骑马", "坐骑", "ride", "boat")) {
+            selected.add("ride");
+            selected.add("dismount");
+            selected.add("place_boat");
+        }
+        if (containsAny(text, "水", "岩浆", "桶", "灭火", "water", "lava", "bucket", "fire")) {
+            selected.add("use_bucket");
+            selected.add("collect_lava");
+            selected.add("extinguish_fire");
+        }
+        if (containsAny(text, "开门", "关门", "拉杆", "按钮", "药水", "珍珠", "雪球", "door", "lever", "button", "potion")) {
+            selected.add("toggle_door");
+            selected.add("use_item");
+        }
+        if (containsAny(text, "种树", "树苗", "骨粉", "庄稼", "农田", "plant", "sapling", "bone meal")) {
+            selected.add("plant_sapling");
+            selected.add("bone_meal");
+            selected.add("farm");
+            selected.add("harvest");
+        }
+        if (containsAny(text, "箱子", "存", "取", "背包满", "整理", "container", "deposit", "withdraw")) {
+            selected.add("deposit_all");
+            selected.add("deposit");
+            selected.add("withdraw");
+            selected.add("compact_inventory");
+            selected.add("drop_junk");
+        }
+        if (containsAny(text, "哪里", "在哪", "坐标", "天气", "群系", "附近", "找", "find", "where")) {
+            selected.add("world_info");
+            selected.add("find_block");
+            selected.add("find_entity");
+        }
+        if (containsAny(text, "烟花", "骰子", "表演", "跳舞", "庆祝", "firework", "dice", "dance")) {
+            selected.add("firework");
+            selected.add("roll_dice");
+        }
+        if (containsAny(text, "op", "tp", "传送", "指令", "command")) selected.add("run_command");
+        if (containsAny(text, "基地", "记住", "地点", "路线", "base", "remember", "place")) {
+            selected.add("set_base");
+            selected.add("mark_place");
+            selected.add("goto_place");
+            selected.add("list_places");
+        }
+        return available.stream().filter(tool -> selected.contains(tool.name())).toList();
+    }
+
+    private static boolean containsAny(String text, String... terms) {
+        for (String term : terms) {
+            if (text.contains(term)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private void registerDefaults() {
         register("say", "Reply to the human in Simplified Chinese. The reply is shown in the AIBot panel.", objectSchema()
                 .property("message", stringSchema("the text to say"))

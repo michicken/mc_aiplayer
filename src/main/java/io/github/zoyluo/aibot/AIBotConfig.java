@@ -27,6 +27,9 @@ public record AIBotConfig(
         Nav nav,
         Pickup pickup
 ) {
+    /** The livestream agent is tuned and verified against this exact Step model. */
+    public static final String LIVE_AGENT_MODEL = "step-3.7-flash";
+
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
     private static AIBotConfig instance = defaults();
 
@@ -94,7 +97,7 @@ public record AIBotConfig(
         return new AIBotConfig(
                 // StepFun step-3.7-flash: ~1s 有 structured tool_calls + 识图,正文在 reasoning_content(需 fallback)。
                 // max_tokens=768: 直播短句足够,且 Step reasoning 吃 token 预算,留余量给正文。
-                new DeepSeek("", "https://api.stepfun.com/step_plan", "step-3.7-flash", 768, 0.3D, 60, 3, 500, false),
+                new DeepSeek("", "https://api.stepfun.com/step_plan", LIVE_AGENT_MODEL, 768, 0.3D, 60, 3, 500, false),
                 new Perception(16, 20, 10, 10, false),
                 new Brain(36, 6, 12, false, true, false, 3, true, false, true), // maxTurns 24→12(早止损);advancedTools 默认藏;ownerEventPush 默认开
                 new Watchdog(120), // 200t(10s)发呆才判卡太钝,120t(6s)更快触发恢复(实例 config 里的旧值 200 部署时须同步改)
@@ -130,14 +133,17 @@ public record AIBotConfig(
             Boolean disableThinking
     ) {
         DeepSeek withApiKey(String apiKey) {
-            return new DeepSeek(apiKey, baseUrl, model, maxTokens, temperature, timeoutSeconds, retryCount, retryBackoffMs, disableThinking);
+            return new DeepSeek(apiKey, baseUrl, LIVE_AGENT_MODEL, maxTokens, temperature, timeoutSeconds, retryCount, retryBackoffMs, disableThinking);
         }
 
         DeepSeek withDefaults(DeepSeek defaults) {
             return new DeepSeek(
                     apiKey == null ? defaults.apiKey : apiKey,
                     blankToDefault(baseUrl, defaults.baseUrl),
-                    blankToDefault(model, defaults.model),
+                    // Do not let an old aibot.json silently switch the livestream brain back
+                    // to DeepSeek or another Step model. The tool and prompt behavior below is
+                    // intentionally validated for step-3.7-flash only.
+                    LIVE_AGENT_MODEL,
                     positiveOrDefault(maxTokens, defaults.maxTokens),
                     temperature,
                     positiveOrDefault(timeoutSeconds, defaults.timeoutSeconds),
