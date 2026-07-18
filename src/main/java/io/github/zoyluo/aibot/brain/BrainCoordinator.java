@@ -474,7 +474,8 @@ public final class BrainCoordinator {
         }
         String text = raw.replace('\r', ' ').replace('\n', ' ')
                 .replace("**", "").replace("`", "").replaceAll("\\s+", " ").strip();
-        String[] prefixes = {"好的，", "好的。", "好，", "收到，", "收到。", "明白了，", "明白，", "没问题，", "当然，"};
+        String[] prefixes = {"好的，", "好的。", "好的!", "好的！", "好，", "收到，", "收到。", "收到!", "收到！",
+                "明白了，", "明白，", "没问题，", "当然，"};
         for (String prefix : prefixes) {
             if (text.startsWith(prefix) && text.length() > prefix.length()) {
                 text = text.substring(prefix.length()).strip();
@@ -485,6 +486,10 @@ public final class BrainCoordinator {
             text = "我" + text.substring(2);
         } else if (text.startsWith("正在为你")) {
             text = "我在" + text.substring(4);
+        } else if (text.startsWith("我会先") || text.startsWith("我会去")
+                || text.startsWith("我会继续") || text.startsWith("我会马上")
+                || text.startsWith("我会试试")) {
+            text = "我" + text.substring(2);
         }
         return shortenSpeech(text, 70);
     }

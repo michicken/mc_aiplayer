@@ -10,6 +10,8 @@ class BrainCoordinatorSpeechTest {
     void removesMechanicalPrefixAndFormattingWithoutChangingMeaning() {
         assertEquals("我去挖铁。", BrainCoordinator.polishSpeech("收到，**我将去挖铁。**"));
         assertEquals("我在找安全入口。", BrainCoordinator.polishSpeech("正在为你找安全入口。"));
+        assertEquals("我先绕开这片水。", BrainCoordinator.polishSpeech("好的！我会先绕开这片水。"));
+        assertEquals("我继续找铁。", BrainCoordinator.polishSpeech("我会继续找铁。"));
     }
 
     @Test
