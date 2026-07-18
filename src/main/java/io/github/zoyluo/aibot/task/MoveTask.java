@@ -3,6 +3,7 @@ package io.github.zoyluo.aibot.task;
 import io.github.zoyluo.aibot.action.ActionResult;
 import io.github.zoyluo.aibot.entity.AIPlayerEntity;
 import io.github.zoyluo.aibot.log.BotLog;
+import io.github.zoyluo.aibot.memory.NavigationMemory;
 import io.github.zoyluo.aibot.pathfinding.Standability;
 import net.minecraft.registry.tag.FluidTags;
 import net.minecraft.server.network.ServerPlayerEntity;
@@ -98,6 +99,14 @@ public final class MoveTask extends AbstractTask {
     }
 
     private void startNavigation(AIPlayerEntity bot) {
+        String dimension = bot.getServerWorld().getRegistryKey().getValue().toString();
+        BlockPos from = bot.getBlockPos();
+        long tick = bot.getServer().getTicks();
+        if (NavigationMemory.INSTANCE.recentlyFailed(bot.getUuid(), dimension, from, goal, tick)) {
+            BotLog.action(bot, "move_route_backoff", "from", compact(from), "goal", compact(goal));
+            fail("move_no_safe_route: recent_route_failure");
+            return;
+        }
         ActionResult result = bot.getActionPack().startPathTo(goal);
         if (result.isFailed()) {
             if (isWaterGoal(bot)) {
@@ -117,6 +126,7 @@ public final class MoveTask extends AbstractTask {
         }
         waypoint = null; // 直达寻路成功 → 不需要经停(也清掉 resume 残留的旧中继)
         resolvedGoal = bot.getActionPack().activePathGoal();
+        NavigationMemory.INSTANCE.recordSuccess(bot.getUuid(), dimension, from, goal);
     }
 
     @Override
@@ -242,6 +252,9 @@ public final class MoveTask extends AbstractTask {
 
     private void failNoSafeRoute(AIPlayerEntity bot, String reason) {
         bot.getActionPack().stopAll();
+        NavigationMemory.INSTANCE.rememberFailure(bot.getUuid(),
+                bot.getServerWorld().getRegistryKey().getValue().toString(), bot.getBlockPos(), goal,
+                bot.getServer().getTicks());
         BotLog.action(bot, "move_no_safe_route", "goal", compact(goal), "reason", reason,
                 "hops", waypointHops);
         fail("move_no_safe_route: " + reason);

@@ -233,6 +233,7 @@ public final class TaskManager {
         for (AIPlayerEntity bot : AIPlayerManager.INSTANCE.all()) {
             abort(bot);
             LongRunningIntentManager.INSTANCE.clear(bot);
+            io.github.zoyluo.aibot.memory.NavigationMemory.INSTANCE.clearFor(bot.getUuid());
         }
         active.clear();
         paused.clear();
@@ -250,6 +251,7 @@ public final class TaskManager {
         lastFailure.remove(bot.getUuid());
         pendingFailure.remove(bot.getUuid());
         silentFailureTasks.remove(bot.getUuid());
+        io.github.zoyluo.aibot.memory.NavigationMemory.INSTANCE.clearFor(bot.getUuid());
         BotReporter.INSTANCE.onCleared(bot);
     }
 
