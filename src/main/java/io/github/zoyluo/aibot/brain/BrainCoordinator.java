@@ -454,13 +454,52 @@ public final class BrainCoordinator {
 
     /** speak 工具调用 → 强制发 role=bot(即使 ≤ SPEECH_MAX_CHARS 仍触发 TTS)。speak 工具实现已截断,到这里都短。 */
     public void triggerSpeech(AIPlayerEntity bot, String text) {
-        if (text == null || text.isBlank()) {
+        String spoken = polishSpeech(text);
+        if (spoken.isBlank()) {
             return;
         }
-        trace(bot, "说(TTS): " + trunc(text, 60));
+        trace(bot, "说(TTS): " + trunc(spoken, 60));
         io.github.zoyluo.aibot.overlay.OverlayService.INSTANCE
-                .recordBotSpeech(bot.getGameProfile().getName(), text);
-        AIBotServerNetworking.INSTANCE.sendBotChat(bot, "bot", text);
+                .recordBotSpeech(bot.getGameProfile().getName(), spoken);
+        AIBotServerNetworking.INSTANCE.sendBotChat(bot, "bot", spoken);
+    }
+
+    /**
+     * The model is kept unchanged, so remove only presentation-only assistant habits at the TTS
+     * boundary. This deliberately never invents words or rewrites an instruction/result.
+     */
+    private static String polishSpeech(String raw) {
+        if (raw == null) {
+            return "";
+        }
+        String text = raw.replace('\r', ' ').replace('\n', ' ')
+                .replace("**", "").replace("`", "").replaceAll("\\s+", " ").strip();
+        String[] prefixes = {"好的，", "好的。", "好，", "收到，", "收到。", "明白了，", "明白，", "没问题，", "当然，"};
+        for (String prefix : prefixes) {
+            if (text.startsWith(prefix) && text.length() > prefix.length()) {
+                text = text.substring(prefix.length()).strip();
+                break;
+            }
+        }
+        if (text.startsWith("我将")) {
+            text = "我" + text.substring(2);
+        } else if (text.startsWith("正在为你")) {
+            text = "我在" + text.substring(4);
+        }
+        return shortenSpeech(text, 70);
+    }
+
+    private static String shortenSpeech(String text, int maximum) {
+        if (text.length() <= maximum) {
+            return text;
+        }
+        for (int index = 20; index < maximum; index++) {
+            char character = text.charAt(index);
+            if (character == '。' || character == '！' || character == '？' || character == '!' || character == '?') {
+                return text.substring(0, index + 1);
+            }
+        }
+        return text.substring(0, maximum - 1).strip() + "…";
     }
 
     /** finish 工具调用 → 标记当前 turn 完成,释放 busy 让玩家发下一条消息。 */
