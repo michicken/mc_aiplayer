@@ -186,12 +186,11 @@ public final class TaskManager {
                 BotLog.task(player, "task_completed", "name", task.name(), "elapsed_ticks", task.elapsedTicks());
                 io.github.zoyluo.aibot.brain.BrainCoordinator.INSTANCE.notifyTaskSettled(player);
             } else if (task.state() == TaskState.FAILED) {
-                boolean silent = silentFailureTasks.remove(uuid, task); // 两参 remove:按实例精确匹配
                 active.remove(uuid);
-                recordFailure(player, task.name(), task.failureReason(), server.getTicks(), !silent);
+                boolean wakeBrain = recordTaskFailure(player, task, task.failureReason(), server.getTicks());
                 BotLog.warn(io.github.zoyluo.aibot.log.LogCategory.TASK, player, "task_failed",
                         "name", task.name(), "reason", task.failureReason(), "elapsed_ticks", task.elapsedTicks());
-                if (!silent) {
+                if (wakeBrain) {
                     io.github.zoyluo.aibot.brain.BrainCoordinator.INSTANCE.notifyTaskSettled(player);
                 }
             }
@@ -200,6 +199,18 @@ public final class TaskManager {
 
     public void recordFailure(AIPlayerEntity bot, String name, String reason, int tick) {
         recordFailure(bot, name, reason, tick, true);
+    }
+
+    /**
+     * 按任务实例兑现 silentFailure 标记。正常 tick 失败与 StuckWatcher 强制中止必须走同一入口，
+     * 否则自动生存反射被 watchdog 中止时仍会错误唤醒大脑。
+     *
+     * @return true 表示应通知/唤醒大脑
+     */
+    public boolean recordTaskFailure(AIPlayerEntity bot, Task task, String reason, int tick) {
+        boolean silent = silentFailureTasks.remove(bot.getUuid(), task);
+        recordFailure(bot, task.name(), reason, tick, !silent);
+        return !silent;
     }
 
     /** wakeBrain=false(空闲池任务):lastFailure 照写(诊断/连败计数保留),pendingFailure 不写=不唤醒大脑。 */

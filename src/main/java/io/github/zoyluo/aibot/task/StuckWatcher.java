@@ -52,7 +52,7 @@ public final class StuckWatcher {
 
         String reason = "stuck:" + task.name();
         TaskManager.INSTANCE.abort(bot);
-        TaskManager.INSTANCE.recordFailure(bot, task.name(), reason, now);
+        TaskManager.INSTANCE.recordTaskFailure(bot, task, reason, now);
         samples.remove(bot.getUuid());
         BotLog.warn(LogCategory.TASK, bot, "task_stuck_aborted",
                 "name", task.name(),

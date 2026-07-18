@@ -128,6 +128,9 @@ public final class DangerWatcher {
                     TaskManager.INSTANCE.pauseFor(bot, "threat: " + top.type());
                 }
                 TaskManager.INSTANCE.assign(bot, task);
+                // 自动生存反射失败由本类的冷却/困境/改策略逻辑消费，不应把一次逃跑卡顿送进模型口播。
+                // lastFailure 仍保留，combatStuck/trappedBackoff 可继续做确定性判断。
+                TaskManager.INSTANCE.markSilentFailure(bot, task);
                 nextThreatAttemptTick.put(bot.getUuid(), server.getTicks() + threatCooldownTicks(top, task));
                 BotLog.danger(bot, "threat_detected",
                         "type", top.type(),
@@ -320,7 +323,9 @@ public final class DangerWatcher {
                     .stream().findFirst().orElse(null);
             if (hostile != null) {
                 BotLog.danger(bot, "trapped_fight_back", "target", hostile.getType().toString());
-                TaskManager.INSTANCE.assign(bot, new CombatTask(hostile.getType(), 1, 0.0F));
+                Task counterattack = new CombatTask(hostile.getType(), 1, 0.0F);
+                TaskManager.INSTANCE.assign(bot, counterattack);
+                TaskManager.INSTANCE.markSilentFailure(bot, counterattack);
                 return true;
             }
         }
@@ -558,9 +563,6 @@ public final class DangerWatcher {
     }
 
     private static Optional<Threat> collectTopThreat(AIPlayerEntity bot) {
-        if (bot.getHealth() < 6.0F) {
-            return Optional.of(new Threat(Threat.Type.LOW_HP, Threat.Severity.HIGH, null, bot.getBlockPos()));
-        }
         // 规避加固:检测半径 10,但只把"能真正威胁到 bot"的敌对怪算进来——bot 眼睛到怪眼睛之间若被实心
         // 方块阻隔(隔着墙/在另一条隧道),怪根本够不到 bot,不应触发战斗/逃跑(实测 bug:被方块挡着的怪
         // 让 bot 一直"正在战斗"、中断正常挖矿)。按距离从近到远找第一个有视线(可达)的怪。
@@ -568,14 +570,26 @@ public final class DangerWatcher {
                 .getEntitiesByClass(LivingEntity.class, bot.getBoundingBox().expand(10.0D),
                         entity -> entity instanceof HostileEntity && entity.isAlive());
         hostiles.sort(Comparator.comparingDouble(bot::distanceTo));
+        LivingEntity nearestThreat = null;
         for (LivingEntity mob : hostiles) {
             if (!hasHostileIntent(bot, mob) || !canReachThreat(bot, mob)) {
                 continue; // 被方块阻隔,够不到 bot → 不算威胁
             }
-            Threat.Severity severity = mob instanceof CreeperEntity
-                    ? Threat.Severity.HIGH : Threat.Severity.MEDIUM;
-            return Optional.of(new Threat(Threat.Type.HOSTILE, severity, mob, mob.getBlockPos()));
+            nearestThreat = mob;
+            break;
         }
+        if (nearestThreat != null) {
+            if (bot.getHealth() < 6.0F) {
+                // 低血是紧迫程度，不是一个空间位置。旧实现把 threat.pos 设为 bot 自己，EvadeTask
+                // 无法计算“远离谁”，只好随机挑方向，实测会迎着怪群逃。保留最近真实敌怪作为逃离源。
+                return Optional.of(new Threat(Threat.Type.LOW_HP, Threat.Severity.HIGH,
+                        nearestThreat, nearestThreat.getBlockPos()));
+            }
+            Threat.Severity severity = nearestThreat instanceof CreeperEntity
+                    ? Threat.Severity.HIGH : Threat.Severity.MEDIUM;
+            return Optional.of(new Threat(Threat.Type.HOSTILE, severity, nearestThreat, nearestThreat.getBlockPos()));
+        }
+        // 低血但附近没有能攻击到 bot 的敌怪时不要随机逃跑；饱食回复、进食和当前任务可正常继续。
         if (bot.isSubmergedInWater() && bot.getAir() < 50) {
             return Optional.of(new Threat(Threat.Type.DROWNING, Threat.Severity.MEDIUM, null, bot.getBlockPos()));
         }

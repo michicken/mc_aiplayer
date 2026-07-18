@@ -354,10 +354,17 @@ public final class HuntTask extends AbstractTask {
     private BlockPos obstacleToward(AIPlayerEntity bot) {
         net.minecraft.util.math.Direction dir = bot.getHorizontalFacing();
         ServerWorld world = bot.getServerWorld();
-        BlockPos ahead = bot.getBlockPos().offset(dir);
+        // getBlockPos() 对站在方块顶面但坐标略低于整数的实体会向下取整。例如实际脚位
+        // Y=72、网络坐标 71.999... 时会得到 y=71，把前方地面当成“腿部障碍”挖掉；
+        // PathExecutor 随后又为安全落脚把它补回，形成挖掉→补回死循环。按碰撞箱底部加小容差
+        // 取真实脚位，并且只处理真有碰撞体的阻挡方块。
+        int feetY = TaskPositionMath.stableFeetY(bot.getBoundingBox().minY);
+        BlockPos feet = new BlockPos(bot.getBlockPos().getX(), feetY, bot.getBlockPos().getZ());
+        BlockPos ahead = feet.offset(dir);
         for (BlockPos p : new BlockPos[]{ahead, ahead.up()}) {
             net.minecraft.block.BlockState st = world.getBlockState(p);
             if (!st.isAir() && st.getFluidState().isEmpty()
+                    && !st.getCollisionShape(world, p).isEmpty()
                     && ToolTier.canHarvestWithInventory(bot, st)) {
                 return p.toImmutable();
             }
