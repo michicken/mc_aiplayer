@@ -610,26 +610,30 @@ public final class ToolRegistry {
             if (message.isBlank()) {
                 return fail("empty_message");
             }
+            message = BrainCoordinator.INSTANCE.reviewModelSpeech(bot, message, "speak");
             BrainCoordinator.INSTANCE.triggerSpeech(bot, message);
             return ok("said");
         });
 
-        register("finish", "End the current turn and say summary aloud. Call it once after an action or answer. For a simple question, finish may be the only tool call. Use a natural short spoken sentence; do not repeat a previous speak message.", objectSchema()
-                .property("summary", stringSchema("natural spoken one-line summary, ≤30 Chinese chars"))
+        register("finish", "Close the current CONVERSATION TURN and say one factual summary aloud. This does NOT mark an assigned action or task complete. For a physical command, first dispatch a real action tool; while its task is RUNNING say only that it started/is ongoing. Claim completion only after the system reports COMPLETED. For a simple question, finish may be the only tool call.", objectSchema()
+                .property("summary", stringSchema("natural spoken one-line summary of VERIFIED current status, ≤30 Chinese chars"))
                 .required("summary")
                 .build(), (bot, args) -> {
             String summary = requiredString(args, "summary");
             if (summary == null || summary.isBlank()) {
-                summary = "Done";
+                summary = "这轮先到这。";
             }
             if (summary.length() > 100) {
                 summary = summary.substring(0, 97) + "...";
             }
-            // 先触发 TTS 让观众听到总结
-            BrainCoordinator.INSTANCE.triggerSpeech(bot, summary);
+            FactualityGate.FinishDecision decision = BrainCoordinator.INSTANCE.reviewModelFinish(bot, summary);
+            if (!decision.allowed()) {
+                return fail(decision.reason());
+            }
+            BrainCoordinator.INSTANCE.triggerSpeech(bot, decision.speech());
             // 标记 turn 完成 → BrainCoordinator 允许下一条用户消息
             BrainCoordinator.INSTANCE.markTurnFinished(bot);
-            return ok("finished: " + summary);
+            return ok("turn_closed");
         });
 
         register("run_command", "Execute ONE server command with OP permission (leading slash optional), e.g. command=\"tp <your_name> <owner_name>\". HARD-LOCKED: only works when the OWNER's current message explicitly demands it; rejected for gift/viewer instructions and self-initiative.", objectSchema()

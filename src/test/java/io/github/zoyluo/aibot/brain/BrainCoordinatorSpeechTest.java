@@ -3,6 +3,7 @@ package io.github.zoyluo.aibot.brain;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class BrainCoordinatorSpeechTest {
@@ -21,5 +22,21 @@ class BrainCoordinatorSpeechTest {
 
         assertTrue(polished.length() <= 70);
         assertEquals("我已经看清前面被水堵住了，先沿着岸边找路。", polished);
+    }
+
+    @Test
+    void onlySuccessfulFinishResultClosesTurn() {
+        ChatMessage rejected = ChatMessage.toolResult(
+                "call-1", "{\"ok\":false,\"message\":\"rejected_no_action\"}", "finish");
+        ChatMessage accepted = ChatMessage.toolResult(
+                "call-2", "{\"ok\":true,\"message\":\"turn_closed\"}", "finish");
+        ChatMessage malformed = ChatMessage.toolResult("call-3", "not-json", "finish");
+        ChatMessage otherTool = ChatMessage.toolResult(
+                "call-4", "{\"ok\":true,\"message\":\"assigned\"}", "gather");
+
+        assertFalse(BrainCoordinator.isSuccessfulFinishResult(rejected));
+        assertTrue(BrainCoordinator.isSuccessfulFinishResult(accepted));
+        assertFalse(BrainCoordinator.isSuccessfulFinishResult(malformed));
+        assertFalse(BrainCoordinator.isSuccessfulFinishResult(otherTool));
     }
 }

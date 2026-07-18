@@ -36,6 +36,9 @@ public final class ActionDispatcher {
             } else {
                 result = invoke(bot, call);
             }
+            if (result.ok()) {
+                BrainCoordinator.INSTANCE.recordSuccessfulActionTool(bot, call.name());
+            }
             BotLog.action(bot, "tool_result", "tool", call.name(), "ok", result.ok(), "message", result.message());
             results.add(ChatMessage.toolResult(call.id(), result.toToolContent(), call.name()));
         }

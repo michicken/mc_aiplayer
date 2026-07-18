@@ -94,6 +94,7 @@ public final class BrainCoordinator {
         }
         conversation.fromOwner = fromOwner;
         conversation.lastToolIntent = text;
+        conversation.actionDispatchedThisTurn = false;
         if (!senderName.contains(":")) {
             // 真人消息(gift:/danmaku:/system: 都带冒号前缀,玩家名不含冒号)记为"最初的完整要求",
             // task_done_wake 时回灌——治复合指令"先A再B"里 B 靠被 trim 的历史回忆导致只做一半。
@@ -150,28 +151,26 @@ public final class BrainCoordinator {
             conversation.turnStartTask = TaskManager.INSTANCE.getActive(bot).orElse(null);
             List<ChatMessage> toolResults = dispatcher.dispatch(bot, response.toolCalls());
             boolean finishCalled = false;
+            int nonFinishResults = 0;
             for (ChatMessage result : toolResults) {
                 String line = humanizeToolResult(result.content());
                 if (line != null) {
                     trace(bot, line);
                 }
                 io.github.zoyluo.aibot.log.ConversationLogger.INSTANCE.onToolResult(bot.getGameProfile().getName(), result.name(), result.toolCallId(), result.content());
-                if ("finish".equals(result.name())) {
+                if (isSuccessfulFinishResult(result)) {
                     finishCalled = true;
                     conversation.uncommittedTools = 0;
                     conversation.finishRecoveryAttempted = false;
-                    if (result.content() != null) {
-                        try {
-                            com.google.gson.JsonObject o = com.google.gson.JsonParser.parseString(result.content()).getAsJsonObject();
-                            if (o.get("ok").getAsBoolean()) {
-                                conversation.finishSummary = "";
-                            }
-                        } catch (RuntimeException ignored) {}
-                    }
+                    conversation.finishSummary = "";
+                } else if (!"finish".equals(result.name())) {
+                    nonFinishResults++;
                 }
             }
             if (!finishCalled) {
-                conversation.uncommittedTools += response.toolCalls().size();
+                // A rejected finish is a correction signal, not completed work. Keeping it out of
+                // uncommittedTools lets the normal tool-result loop ask Step for a real action.
+                conversation.uncommittedTools += nonFinishResults;
             }
             ReplayRecorder.INSTANCE.onDecision(bot, conversation.lastPerceptionDigest, response.toolCalls(), replayResult(toolResults));
             conversation.history.addAll(toolResults);
@@ -230,7 +229,8 @@ public final class BrainCoordinator {
             trace(bot, "! 工具已执行但漏收尾，补一次 finish");
             String hint = "[系统提示] 上一轮你执行了 " + conversation.uncommittedTools
                     + " 个工具后直接结束了,但没有调用 finish(summary=\"...\")。"
-                    + "现在只调用一次 finish，用一句自然短话收尾；不要再调用任何行动工具，也不要开始新任务。";
+                    + "现在只调用一次 finish，用一句自然短话收尾；不要再调用任何行动工具，也不要开始新任务。"
+                    + "只陈述工具结果已经证实的状态；任务仍在 RUNNING 时只能说开始了或还在做。";
             conversation.history.add(ChatMessage.system(hint));
             conversation.finishRecoveryAttempted = true;
             trimHistory(conversation);
@@ -252,7 +252,7 @@ public final class BrainCoordinator {
         }
         trimHistory(conversation);
         BotLog.comm(bot, "conversation_done", "finish_reason", response.finishReason());
-        trace(bot, "OK 完成");
+        trace(bot, "OK 本轮结束");
         drainPending(bot, conversation);
     }
 
@@ -464,6 +464,71 @@ public final class BrainCoordinator {
         AIBotServerNetworking.INSTANCE.sendBotChat(bot, "bot", spoken);
     }
 
+    /** Applies only to model-authored speak/finish text; internal safety and system TTS bypass it. */
+    String reviewModelSpeech(AIPlayerEntity bot, String text, String source) {
+        BotConversation conversation = conversations.get(bot.getUuid());
+        if (conversation == null) {
+            return text;
+        }
+        FactualityGate.SpeechDecision decision = FactualityGate.reviewSpeech(
+                factualityContext(bot, conversation), text);
+        if (decision.rewritten()) {
+            logPrematureCompletionRewrite(bot, source, text, decision.speech());
+        }
+        return decision.speech();
+    }
+
+    FactualityGate.FinishDecision reviewModelFinish(AIPlayerEntity bot, String summary) {
+        BotConversation conversation = conversations.get(bot.getUuid());
+        if (conversation == null) {
+            return new FactualityGate.FinishDecision(true, summary, "", false);
+        }
+        FactualityGate.FinishDecision decision = FactualityGate.reviewFinish(
+                factualityContext(bot, conversation), summary);
+        if (!decision.allowed()) {
+            BotLog.comm(bot, "finish_rejected_no_action",
+                    "request", trunc(conversation.lastToolIntent, 100),
+                    "summary", trunc(summary, 100));
+            trace(bot, "!! 还没执行行动，拒绝 finish");
+        } else if (decision.rewritten()) {
+            logPrematureCompletionRewrite(bot, "finish", summary, decision.speech());
+        }
+        return decision;
+    }
+
+    /** Called after a successful mutating/action tool result so verbal-only finish cannot pass. */
+    void recordSuccessfulActionTool(AIPlayerEntity bot, String toolName) {
+        if (!FactualityGate.isActionTool(toolName)) {
+            return;
+        }
+        BotConversation conversation = conversations.get(bot.getUuid());
+        if (conversation == null) {
+            return;
+        }
+        conversation.actionDispatchedThisTurn = true;
+        BotLog.comm(bot, "action_dispatched_this_turn", "tool", toolName);
+    }
+
+    private static FactualityGate.Context factualityContext(AIPlayerEntity bot, BotConversation conversation) {
+        boolean activeGoal = io.github.zoyluo.aibot.goal.GoalExecutor.INSTANCE.hasActivePlan(bot);
+        boolean runningTask = TaskManager.INSTANCE.getActive(bot).isPresent() || TaskManager.INSTANCE.hasPaused(bot);
+        return new FactualityGate.Context(
+                conversation.lastToolIntent,
+                conversation.fromOwner,
+                conversation.actionDispatchedThisTurn,
+                runningTask,
+                activeGoal);
+    }
+
+    private static void logPrematureCompletionRewrite(
+            AIPlayerEntity bot, String source, String original, String replacement) {
+        BotLog.comm(bot, "premature_completion_rewritten",
+                "source", source,
+                "original", trunc(original, 100),
+                "replacement", trunc(replacement, 100));
+        trace(bot, "! 未完成，已纠正口头汇报");
+    }
+
     /**
      * The model is kept unchanged, so remove only presentation-only assistant habits at the TTS
      * boundary. This deliberately never invents words or rewrites an instruction/result.
@@ -618,6 +683,11 @@ public final class BrainCoordinator {
         if (text.startsWith("继续") || text.startsWith("接着") || text.startsWith("接着干")) {
             return true;
         }
+        // Status/information questions may contain action words ("挖完了吗/钻石怎么挖") but
+        // must not preempt the task they are asking about.
+        if (FactualityGate.isStatusQuestion(text) || FactualityGate.isInformationalQuestion(text)) {
+            return true;
+        }
         if (containsAny(text,
                 "停", "停止", "取消", "别", "改", "换", "放弃", "回来", "过来", "跟", "去", "做", "挖", "采", "收集", "找", "盖", "建", "杀", "打", "保护", "逃", "给我", "拿", "睡", "开始", "饿", "吃", "command", "tp", "传送")) {
             return false;
@@ -680,6 +750,8 @@ public final class BrainCoordinator {
         String count = a.has("count") ? "×" + str(a, "count") : "";
         return switch (call.name()) {
             case "say" -> "说: " + str(a, "message");
+            case "speak" -> "* 准备发言";
+            case "finish" -> "* 收尾本轮";
             case "run_command" -> "* 执行指令 /" + str(a, "command");
             case "scan_surroundings" -> "* 扫描周围环境";
             case "smart_navigate" -> "* 智能移动 " + smartNavigateLabel(str(a, "mode"));
@@ -803,11 +875,25 @@ public final class BrainCoordinator {
             boolean ok = o.has("ok") && o.get("ok").getAsBoolean();
             String message = str(o, "message");
             if (ok) {
-                return message.isBlank() || "said".equals(message) ? null : "OK " + trunc(message, 50);
+                return message.isBlank() || "said".equals(message) || "turn_closed".equals(message)
+                        ? null
+                        : "OK " + trunc(message, 50);
             }
             return "!! " + trunc(message.isBlank() ? content : message, 90);
         } catch (RuntimeException e) {
             return "结果 " + trunc(content, 60);
+        }
+    }
+
+    static boolean isSuccessfulFinishResult(ChatMessage result) {
+        if (result == null || !"finish".equals(result.name()) || result.content() == null) {
+            return false;
+        }
+        try {
+            com.google.gson.JsonObject object = com.google.gson.JsonParser.parseString(result.content()).getAsJsonObject();
+            return object.has("ok") && object.get("ok").isJsonPrimitive() && object.get("ok").getAsBoolean();
+        } catch (RuntimeException ignored) {
+            return false;
         }
     }
 
@@ -1088,7 +1174,7 @@ public final class BrainCoordinator {
 
                 只做当前消息真正要求的事。问候、吐槽和问状态时只简短回答；不要无故播报、不要复述用户的话、不要说“收到/正在为您/我将”。有正在跑的任务时，主人只是聊天或问进度并不代表取消任务；只有明确说停、改、换目标才停止。
 
-                要让直播间听到的话用 speak，一次一句，短而有情绪；纯问答直接 finish，别再用 speak 重复同一句。每轮结束都调用 finish。派发了持续任务、目标或导航后就立即 finish 并等待系统通知，绝不连续插入别的动作，也不把“已开始”说成“已完成”。只有任务状态 COMPLETED 才能说完成，失败要如实说卡在哪里。
+                要让直播间听到的话用 speak，一次一句，短而有情绪；纯问答直接 finish，别再用 speak 重复同一句。每轮结束都调用 finish。finish 只关闭当前对话轮次，绝不代表行动或任务已经完成。派发了持续任务、目标或导航后就立即 finish 并等待系统通知，此时只能说“开始了/还在做”，绝不能说“完成了/拿到了/搞定了”。只有系统明确给出任务状态 COMPLETED 才能说完成，失败要如实说卡在哪里。
 
                 移动只用 smart_navigate，战斗只用 smart_combat；它们会处理绕路、跳跃、普通障碍和安全。成品、工具、盔甲和锭优先 achieve_goal；矿石用 mine_ore；木石等基础材料用 gather。回答“附近有没有/在哪里”之前先 scan_surroundings。空间指代“那里/标记处”使用 use_marker，位置不明就问一句，不要猜。
 
@@ -1112,6 +1198,7 @@ public final class BrainCoordinator {
         private io.github.zoyluo.aibot.task.Task turnStartTask; // 本轮 dispatch 前已在跑的任务;续航据此判断本轮是否新派了任务
         private String lastUserRequest; // 最近一条真人消息原文(≤120字):task_done_wake 回灌,治复合指令只做一半
         private String lastToolIntent = ""; // 最近一条请求:用于给 Step 裁剪本轮工具面，避免 124 个工具互相干扰
+        private boolean actionDispatchedThisTurn; // 新用户消息时清零；成功行动工具置 true，防口头答应后直接 finish
         private final Deque<String[]> pendingUserMessages = new ArrayDeque<>(); // 在途期间的新消息,本轮结束立即接续处理
         private int lastPromptTokens;
         private int lastCompletionTokens;
