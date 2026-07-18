@@ -13,6 +13,7 @@ import io.github.zoyluo.aibot.perception.PerceptionSnapshot;
 import io.github.zoyluo.aibot.task.MemoryStore;
 import io.github.zoyluo.aibot.task.LongRunningIntentManager;
 import io.github.zoyluo.aibot.task.TaskManager;
+import io.github.zoyluo.aibot.task.TaskState;
 import io.github.zoyluo.aibot.task.TaskStatus;
 
 import java.util.ArrayDeque;
@@ -95,6 +96,8 @@ public final class BrainCoordinator {
         conversation.fromOwner = fromOwner;
         conversation.lastToolIntent = text;
         conversation.actionDispatchedThisTurn = false;
+        conversation.taskDispatchedThisTurn = false;
+        conversation.actionRecoveryAttempted = false;
         conversation.modelSpeechGate.reset();
         if (!senderName.contains(":")) {
             // 真人消息(gift:/danmaku:/system: 都带冒号前缀,玩家名不含冒号)记为"最初的完整要求",
@@ -134,8 +137,18 @@ public final class BrainCoordinator {
         if (response.content() != null && !response.content().isBlank()) {
             // 模型的 plain text **只上面板/HUD,绝不进 TTS**——观众要听到的话必须走 speak/finish 工具。
             // 这修复用户反复反馈的"没调用 TTS 也会把所有文本念出来"(含 Step 把思考写进 content 的泄漏)。
-            trace(bot, "说: " + trunc(response.content(), 70));
-            sendPanelDisplay(bot, response.content());
+            FactualityGate.Context displayContext = factualityContext(bot, conversation);
+            if (FactualityGate.isUnbackedActionCommitment(displayContext, response.content())) {
+                BotLog.comm(bot, "unbacked_action_text_suppressed", "text", trunc(response.content(), 100));
+                trace(bot, "!! 没派任务的口头答应已拦截");
+            } else {
+                FactualityGate.SpeechDecision display = FactualityGate.reviewSpeech(displayContext, response.content());
+                if (display.rewritten()) {
+                    logPrematureCompletionRewrite(bot, "plain_text", response.content(), display.speech());
+                }
+                trace(bot, "说: " + trunc(display.speech(), 70));
+                sendPanelDisplay(bot, display.speech());
+            }
         }
         conversation.lastPromptTokens = response.promptTokens();
         conversation.lastCompletionTokens = response.completionTokens();
@@ -220,6 +233,25 @@ public final class BrainCoordinator {
             trimHistory(conversation);
             scheduleContinuation(bot, conversation);
             return;
+        }
+
+        if (needsActionDispatchRecovery(bot, conversation, response.content())) {
+            if (!conversation.actionRecoveryAttempted) {
+                conversation.actionRecoveryAttempted = true;
+                BotLog.comm(bot, "action_dispatch_recovery_submitted",
+                        "request", trunc(conversation.lastToolIntent, 100),
+                        "finish_reason", response.finishReason());
+                trace(bot, "! 还没派发任务，补一次实际执行请求");
+                conversation.history.add(ChatMessage.system("主人给的是需要实际执行的任务，但你刚才没有成功调用任何行动工具。"
+                        + "不要只说“我去做”或直接 finish；现在先调用一个合适的执行工具。"
+                        + "只有位置或要求确实不清楚时，才用一句明确的问题向主人确认。"));
+                trimHistory(conversation);
+                submit(bot, conversation);
+                return;
+            }
+            BotLog.comm(bot, "action_dispatch_recovery_exhausted",
+                    "request", trunc(conversation.lastToolIntent, 100));
+            sendPanelChat(bot, "system", "这件事还没有成功启动，我没有把它当成完成。");
         }
 
         // Step 偶尔在工具结果后直接 stop。旧逻辑只把提醒塞进历史后就结束请求，提醒永远不会
@@ -478,6 +510,14 @@ public final class BrainCoordinator {
         if (conversation == null) {
             return new ModelSpeechDecision(true, text, "");
         }
+        FactualityGate.Context context = factualityContext(bot, conversation);
+        if (FactualityGate.isUnbackedActionCommitment(context, text)) {
+            BotLog.comm(bot, "speech_rejected_before_action", "source", source, "text", trunc(text, 100));
+            trace(bot, "!! 先派任务，不能只口头答应");
+            return new ModelSpeechDecision(false, "",
+                    "action_not_dispatched: 这是主人交代的任务。先调用实际行动工具；不能只口头答应。"
+                            + "若缺少位置或条件，明确问主人需要的信息。");
+        }
         if (!conversation.modelSpeechGate.reserve()) {
             BotLog.comm(bot, "duplicate_model_speech_blocked", "source", source, "text", trunc(text, 100));
             trace(bot, "! 本轮已经说过一句，拒绝重复口播");
@@ -533,18 +573,36 @@ public final class BrainCoordinator {
             return;
         }
         conversation.actionDispatchedThisTurn = true;
+        if (TaskManager.INSTANCE.getActive(bot).isPresent()
+                || io.github.zoyluo.aibot.goal.GoalExecutor.INSTANCE.hasActivePlan(bot)) {
+            conversation.taskDispatchedThisTurn = true;
+        }
         BotLog.comm(bot, "action_dispatched_this_turn", "tool", toolName);
     }
 
     private static FactualityGate.Context factualityContext(AIPlayerEntity bot, BotConversation conversation) {
         boolean activeGoal = io.github.zoyluo.aibot.goal.GoalExecutor.INSTANCE.hasActivePlan(bot);
         boolean runningTask = TaskManager.INSTANCE.getActive(bot).isPresent() || TaskManager.INSTANCE.hasPaused(bot);
+        TaskState taskState = TaskManager.INSTANCE.status(bot).state();
         return new FactualityGate.Context(
                 conversation.lastToolIntent,
                 conversation.fromOwner,
                 conversation.actionDispatchedThisTurn,
                 runningTask,
-                activeGoal);
+                activeGoal,
+                conversation.taskDispatchedThisTurn,
+                taskState == TaskState.COMPLETED,
+                taskState == TaskState.FAILED);
+    }
+
+    private static boolean needsActionDispatchRecovery(AIPlayerEntity bot,
+                                                        BotConversation conversation,
+                                                        String modelText) {
+        FactualityGate.Context context = factualityContext(bot, conversation);
+        return context.fromOwner()
+                && FactualityGate.requiresActionDispatch(context.request())
+                && !context.actionDispatched()
+                && !FactualityGate.isClarificationRequest(modelText);
     }
 
     private static void logPrematureCompletionRewrite(
@@ -1232,6 +1290,8 @@ public final class BrainCoordinator {
         private String lastUserRequest; // 最近一条真人消息原文(≤120字):task_done_wake 回灌,治复合指令只做一半
         private String lastToolIntent = ""; // 最近一条请求:用于给 Step 裁剪本轮工具面，避免 124 个工具互相干扰
         private boolean actionDispatchedThisTurn; // 新用户消息时清零；成功行动工具置 true，防口头答应后直接 finish
+        private boolean taskDispatchedThisTurn; // 当前轮派出的长期任务未得到 COMPLETED 前，禁止任务完成口播
+        private boolean actionRecoveryAttempted; // 模型没有调工具时只补一次，防止消耗额度的无穷自问
         private final TurnSpeechGate modelSpeechGate = new TurnSpeechGate(); // 每个真实对话轮最多一句模型 TTS
         private final Deque<String[]> pendingUserMessages = new ArrayDeque<>(); // 在途期间的新消息,本轮结束立即接续处理
         private int lastPromptTokens;

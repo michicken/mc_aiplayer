@@ -21,6 +21,9 @@ public final class InventoryAction {
         if (!PlayerInventory.isValidHotbarIndex(slot)) {
             return ActionResult.failed("slot_out_of_range");
         }
+        if (player.getInventory().selectedSlot == slot) {
+            return ActionResult.SUCCESS;
+        }
         player.getInventory().selectedSlot = slot;
         BotLog.action(player, "select_slot", "slot", slot);
         return ActionResult.SUCCESS;
@@ -58,6 +61,9 @@ public final class InventoryAction {
             return -1;
         }
         if (PlayerInventory.isValidHotbarIndex(sourceSlot)) {
+            if (inventory.selectedSlot == sourceSlot) {
+                return sourceSlot;
+            }
             inventory.selectedSlot = sourceSlot;
             inventory.markDirty();
             BotLog.action(player, "equip_slot", "source_slot", sourceSlot, "hotbar_slot", sourceSlot);

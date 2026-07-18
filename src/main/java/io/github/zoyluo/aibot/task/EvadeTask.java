@@ -9,6 +9,11 @@ import net.minecraft.util.math.Vec3d;
 public final class EvadeTask extends AbstractTask {
     private final Threat threat;
     private BlockPos escapeGoal;
+    private boolean tracksThreatDistance;
+    private double startingThreatDistance;
+    private double currentThreatDistance;
+    private double bestThreatDistance;
+    private double safeThreatDistance;
 
     public EvadeTask(Threat threat) {
         this.threat = threat;
@@ -26,11 +31,24 @@ public final class EvadeTask extends AbstractTask {
 
     @Override
     public double progress() {
-        return state == TaskState.COMPLETED ? 1.0D : Math.min(0.95D, elapsed / 160.0D);
+        if (state == TaskState.COMPLETED) {
+            return 1.0D;
+        }
+        if (tracksThreatDistance) {
+            return EvadeMath.progress(startingThreatDistance, bestThreatDistance, safeThreatDistance);
+        }
+        return 0.0D;
     }
 
     @Override
     protected void onStart(AIPlayerEntity bot) {
+        tracksThreatDistance = threat.entity() != null || threat.pos() != null;
+        if (tracksThreatDistance) {
+            startingThreatDistance = horizontalDistance(bot.getPos(), threatPosition());
+            currentThreatDistance = startingThreatDistance;
+            bestThreatDistance = startingThreatDistance;
+            safeThreatDistance = EvadeMath.safeDistance(startingThreatDistance);
+        }
         if (startEscape(bot)) {
             // 逃命必须冲刺:走路 4.3m/s 对僵尸追击 4.0m/s 只快一线,寻路绕障/起步延迟就被贴脸磨死
             //(实测无装备 bot 夜间远征被僵尸追杀致死)。冲刺 5.6m/s 才能真正甩开。
@@ -41,32 +59,66 @@ public final class EvadeTask extends AbstractTask {
 
     @Override
     protected void onTick(AIPlayerEntity bot) {
+        if (threat.entity() != null && !threat.entity().isAlive()) {
+            completeEscape(bot);
+            return;
+        }
+        if (tracksThreatDistance) {
+            currentThreatDistance = horizontalDistance(bot.getPos(), threatPosition());
+            if (currentThreatDistance > bestThreatDistance + 0.5D) {
+                bestThreatDistance = currentThreatDistance;
+            }
+            if (currentThreatDistance >= safeThreatDistance) {
+                completeEscape(bot);
+                return;
+            }
+        }
         if (escapeGoal == null) {
             // 无处可逃(深处隧道/被围)→ 干净失败,交 DangerWatcher 升级筑墙自保,不假完成空转挨打。
-            fail("no_valid_escape_route");
+            failEscape(bot, "no_valid_escape_route");
             return;
         }
         bot.getActionPack().setSprinting(true); // 持续保持(其他控制器可能每 tick 复位)
         if (bot.getBlockPos().getSquaredDistance(escapeGoal) <= 6.25D) {
-            bot.getActionPack().setSprinting(false);
-            complete();
+            if (!tracksThreatDistance) {
+                completeEscape(bot);
+                return;
+            }
+            // A reachable fallback is only one leg of the escape. Reaching it is not evidence that
+            // the threat has been shaken; keep extending the route until the measured gap is safe.
+            escapeGoal = null;
+            if (!startEscape(bot)) {
+                failEscape(bot, "no_valid_escape_route");
+            }
             return;
         }
         if (bot.getActionPack().isPathExecutorIdle() && elapsed > 10) {
             if (!startEscape(bot)) {
-                fail("no_valid_escape_route");
+                failEscape(bot, "no_valid_escape_route");
                 return;
             }
         }
         if (elapsed > 400) {
-            bot.getActionPack().setSprinting(false);
-            fail("evade_timeout");
+            failEscape(bot, "evade_timeout");
         }
     }
 
     @Override
     protected void onAbort(AIPlayerEntity bot) {
         bot.getActionPack().setSprinting(false);
+        bot.getActionPack().stopAll();
+    }
+
+    private void completeEscape(AIPlayerEntity bot) {
+        bot.getActionPack().setSprinting(false);
+        bot.getActionPack().stopAll();
+        complete();
+    }
+
+    private void failEscape(AIPlayerEntity bot, String reason) {
+        bot.getActionPack().setSprinting(false);
+        bot.getActionPack().stopAll();
+        fail(reason);
     }
 
     /**

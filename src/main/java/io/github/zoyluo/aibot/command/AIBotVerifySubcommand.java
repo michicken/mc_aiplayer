@@ -18,6 +18,7 @@ import io.github.zoyluo.aibot.task.BuildTask;
 import io.github.zoyluo.aibot.task.CombatTask;
 import io.github.zoyluo.aibot.task.DescendToYTask;
 import io.github.zoyluo.aibot.task.DigDownTask;
+import io.github.zoyluo.aibot.task.EvadeTask;
 import io.github.zoyluo.aibot.task.OreDigTask;
 import io.github.zoyluo.aibot.task.ContainerTask;
 import io.github.zoyluo.aibot.task.CraftTask;
@@ -32,6 +33,7 @@ import io.github.zoyluo.aibot.task.Task;
 import io.github.zoyluo.aibot.task.TaskManager;
 import io.github.zoyluo.aibot.task.TaskState;
 import io.github.zoyluo.aibot.task.TaskStatus;
+import io.github.zoyluo.aibot.task.Threat;
 import net.minecraft.block.Block;
 import net.minecraft.block.Blocks;
 import net.minecraft.entity.EntityType;
@@ -78,6 +80,7 @@ public final class AIBotVerifySubcommand {
             "job",
             "craft_chain",
             "drowning",
+            "evade_distance",
             "nav_obstacle",
             "nav_gap",
             "nav_smart_dig",
@@ -221,6 +224,7 @@ public final class AIBotVerifySubcommand {
     // 不可达目标快速认输(nav_unreachable)。前三条测"会自救",最后一条测"会认输"——
     // 空转不报错比干净失败更伤:实操里 bot 看着在干活,实际原地打转浪费整局。
     private static final List<String> NAV_SUITE = List.of(
+            "evade_distance",
             "real_nav_far",
             "nav_smart_dig",
             "nav_smart_scaffold",
@@ -375,6 +379,7 @@ public final class AIBotVerifySubcommand {
             case "build" -> assignBuild(bot);
             case "craft_chain" -> assignCraftChain(bot);
             case "drowning" -> verifyDrowning(bot);
+            case "evade_distance" -> assignEvadeDistance(bot);
             case "nav_obstacle" -> assignNavObstacle(bot);
             case "nav_gap" -> assignNavGap(bot);
             case "nav_smart_dig" -> assignNavSmartDig(bot);
@@ -1102,6 +1107,7 @@ public final class AIBotVerifySubcommand {
         clearInventory(bot);
         ServerWorld world = bot.getServerWorld();
         BlockPos origin = bot.getBlockPos();
+        clearNearbyMobs(world, origin);
         // 聚焦"感知择源 → 打猎 → 烤肉"食物核心:给现成前置(熔炉+燃料+剑),不让 Goal.Food 倒推去挖石做炉
         //(dig_down 挖深井会把 bot 困在井底、追不到地表的牛——那是挖矿场景的 bug,单独修)。
         InventoryAction.giveItem(bot, new ItemStack(Items.FURNACE, 1));
@@ -1131,6 +1137,7 @@ public final class AIBotVerifySubcommand {
         clearInventory(bot);
         ServerWorld world = bot.getServerWorld();
         BlockPos origin = bot.getBlockPos();
+        clearNearbyMobs(world, origin);
         InventoryAction.giveItem(bot, new ItemStack(Items.COBBLESTONE, 8));
         InventoryAction.giveItem(bot, new ItemStack(Items.CRAFTING_TABLE, 1));
         InventoryAction.giveItem(bot, new ItemStack(Items.COAL, 8));
@@ -2525,6 +2532,34 @@ public final class AIBotVerifySubcommand {
         });
     }
 
+    /** Escape must finish from measured safety, not elapsed time or a watchdog abort. */
+    private static Result assignEvadeDistance(AIPlayerEntity bot) {
+        prepareArea(bot);
+        clearInventory(bot);
+        ServerWorld world = bot.getServerWorld();
+        BlockPos origin = bot.getBlockPos();
+        clearNearbyMobs(world, origin);
+        world.setTimeOfDay(13000L);
+
+        ZombieEntity zombie = EntityType.ZOMBIE.create(world, SpawnReason.COMMAND);
+        if (zombie == null) {
+            return Result.fail("evade_distance", "zombie_spawn_failed");
+        }
+        zombie.setAiDisabled(true);
+        zombie.setInvulnerable(true);
+        BlockPos threatPos = origin.east(8);
+        zombie.refreshPositionAndAngles(
+                threatPos.getX() + 0.5D, threatPos.getY(), threatPos.getZ() + 0.5D, 0.0F, 0.0F);
+        world.spawnEntity(zombie);
+
+        Threat threat = new Threat(Threat.Type.HOSTILE, Threat.Severity.MEDIUM, zombie, threatPos);
+        return assignTask(bot, "evade_distance", new EvadeTask(threat), 400,
+                status -> status.state() == TaskState.COMPLETED
+                        && bot.isAlive()
+                        && bot.distanceTo(zombie) >= 17.5F,
+                zombie::discard);
+    }
+
     // 崖壁采木(钻石 67% 失败的头号坎,确定性复现):    // 崖壁采木(钻石 67% 失败的头号坎,确定性复现):bot 在画布平台,树长在东侧一道**陡坑**底部
     // (与平台间隔一道 6 格垂直落差,纯步行 GOAL_UNREACHABLE)。断言 bot 升级挖掘接近、下沉够到、
     // 采足 3 木、零死亡。这是"任何地形都能采到木"→"任何地形都能挖钻石"的第一关。
@@ -2853,6 +2888,17 @@ public final class AIBotVerifySubcommand {
         return Result.running(feature, timeoutTicks, assertion);
     }
 
+    private static Result assignTask(AIPlayerEntity bot, String feature, Task task, int timeoutTicks,
+                                     Predicate<TaskStatus> assertion, Runnable cleanup) {
+        try {
+            TaskManager.INSTANCE.assign(bot, task);
+            return Result.running(feature, timeoutTicks, assertion, cleanup);
+        } catch (RuntimeException exception) {
+            cleanup.run();
+            throw exception;
+        }
+    }
+
     private static void prepareArea(AIPlayerEntity bot) {
         ServerWorld world = bot.getServerWorld();
         world.setTimeOfDay(1000L); // 设白天:套件后段入夜,夜间睡觉反射抢占场景任务(实测 farm_irrigate 偶发 aborted)
@@ -3033,6 +3079,9 @@ public final class AIBotVerifySubcommand {
                         && server.getTicks() - active.startedTick() < active.result().timeoutTicks()) {
                     return false;
                 }
+                if (active != null) {
+                    active.result().cleanup().run();
+                }
                 record(Result.fail(active == null ? "run" : active.result().feature(), "bot_removed"));
                 finish();
                 return true;
@@ -3074,58 +3123,62 @@ public final class AIBotVerifySubcommand {
             // (不管任务状态,含 idle/RUNNING),达成即 PASS;超时则 abort 任务并 FAIL(detail 带最后任务状态)。
             if (running.patient()) {
                 if (running.assertion().test(status)) {
-                    record(Result.pass(running.feature(), "completed in " + elapsedTicks + " ticks"));
-                    active = null;
+                    concludeActive(Result.pass(running.feature(), "completed in " + elapsedTicks + " ticks"));
                     return;
                 }
                 if (elapsedTicks >= running.timeoutTicks()) {
                     GoalExecutor.INSTANCE.clear(bot); // 先清 goal:abort 任务会触发其 replan 复活,跨场景泄漏(实测污染后续 3 场景)
                     TaskManager.INSTANCE.abort(bot);
-                    record(Result.fail(running.feature(), "verify_timeout status=" + status.name() + " " + status.description()));
-                    active = null;
+                    concludeActive(Result.fail(running.feature(),
+                            "verify_timeout status=" + status.name() + " " + status.description()));
                 }
                 return;
             }
             if (status.state() == TaskState.COMPLETED) {
                 if (running.expectFail()) {
                     // 反向场景:任务"完成"了反而是错——说明场景前提没立住(目标其实可达),记 FAIL 提示人工复查布景。
-                    record(Result.fail(running.feature(), "should_have_failed: completed in " + elapsedTicks + " ticks"));
-                    active = null;
+                    concludeActive(Result.fail(running.feature(),
+                            "should_have_failed: completed in " + elapsedTicks + " ticks"));
                     return;
                 }
                 if (running.assertion().test(status)) {
-                    record(Result.pass(running.feature(), "completed in " + elapsedTicks + " ticks"));
+                    concludeActive(Result.pass(running.feature(), "completed in " + elapsedTicks + " ticks"));
                 } else if (running.allowGoalContinuation() && GoalExecutor.INSTANCE.hasActivePlan(bot)) {
                     return;
                 } else {
-                    record(Result.fail(running.feature(), "assertion_failed status=" + status.name() + " " + status.description()));
+                    concludeActive(Result.fail(running.feature(),
+                            "assertion_failed status=" + status.name() + " " + status.description()));
                 }
-                active = null;
                 return;
             }
             if (status.state() == TaskState.FAILED) {
                 if (running.expectFail()) {
                     // 反向场景的 PASS:超时前干净报了失败(而非空转到永远)。detail 带失败原因+耗时,便于核对失败得"对不对"。
-                    record(Result.pass(running.feature(), "clean fail in " + elapsedTicks + " ticks: "
+                    concludeActive(Result.pass(running.feature(), "clean fail in " + elapsedTicks + " ticks: "
                             + (status.failureReason().isBlank() ? "task_failed" : status.failureReason())));
-                    active = null;
                     return;
                 }
                 if (running.allowGoalContinuation() && GoalExecutor.INSTANCE.hasActivePlan(bot)) {
                     return;
                 }
-                record(Result.fail(running.feature(), status.failureReason().isBlank() ? "task_failed" : status.failureReason()));
-                active = null;
+                concludeActive(Result.fail(running.feature(),
+                        status.failureReason().isBlank() ? "task_failed" : status.failureReason()));
                 return;
             }
             if (elapsedTicks >= running.timeoutTicks()) {
                 GoalExecutor.INSTANCE.clear(bot); // 先清 goal 再 abort,杜绝 replan 复活跨场景泄漏(同上)
                 TaskManager.INSTANCE.abort(bot);
                 // expectFail 场景超时 = 任务既没完成也没认输、一直空转——这正是反向场景要钉死的故障形态,换专属前缀好认。
-                record(Result.fail(running.feature(), (running.expectFail() ? "no_clean_fail_before_timeout" : "verify_timeout")
-                        + " status=" + status.name() + " " + status.description()));
-                active = null;
+                concludeActive(Result.fail(running.feature(),
+                        (running.expectFail() ? "no_clean_fail_before_timeout" : "verify_timeout")
+                                + " status=" + status.name() + " " + status.description()));
             }
+        }
+
+        private void concludeActive(Result outcome) {
+            active.result().cleanup().run();
+            record(outcome);
+            active = null;
         }
 
         private void record(Result result) {
@@ -3170,31 +3223,44 @@ public final class AIBotVerifySubcommand {
                           boolean expectFail,
                           boolean patient,
                           Predicate<TaskStatus> assertion,
-                          Consumer<AIPlayerEntity> perTick) {
+                          Consumer<AIPlayerEntity> perTick,
+                          Runnable cleanup) {
         private static final Consumer<AIPlayerEntity> NO_TICK = bot -> {
+        };
+        private static final Runnable NO_CLEANUP = () -> {
         };
 
         private static Result pass(String feature, String detail) {
-            return new Result(feature, true, detail, false, 0, false, false, false, ignored -> true, NO_TICK);
+            return new Result(feature, true, detail, false, 0, false, false, false,
+                    ignored -> true, NO_TICK, NO_CLEANUP);
         }
 
         private static Result fail(String feature, String detail) {
-            return new Result(feature, false, detail, false, 0, false, false, false, ignored -> false, NO_TICK);
+            return new Result(feature, false, detail, false, 0, false, false, false,
+                    ignored -> false, NO_TICK, NO_CLEANUP);
         }
 
         private static Result running(String feature, int timeoutTicks, Predicate<TaskStatus> assertion) {
-            return new Result(feature, false, "running", true, timeoutTicks, false, false, false, assertion, NO_TICK);
+            return running(feature, timeoutTicks, assertion, NO_CLEANUP);
+        }
+
+        private static Result running(String feature, int timeoutTicks, Predicate<TaskStatus> assertion,
+                                      Runnable cleanup) {
+            return new Result(feature, false, "running", true, timeoutTicks, false, false, false,
+                    assertion, NO_TICK, cleanup);
         }
 
         private static Result runningGoal(String feature, int timeoutTicks, Predicate<TaskStatus> assertion) {
-            return new Result(feature, false, "running", true, timeoutTicks, true, false, false, assertion, NO_TICK);
+            return new Result(feature, false, "running", true, timeoutTicks, true, false, false,
+                    assertion, NO_TICK, NO_CLEANUP);
         }
 
         // 带每-tick 副作用钩子的 runningGoal:perTick 在 pollActive 每个服务端 tick 都被调用(无论有无 task 完成),
         // 用于测试期持续操纵世界(如强制催熟作物,绕开自然随机刻生长的漫长等待)。assertion 仍是成功判定。
         private static Result runningGoal(String feature, int timeoutTicks,
                                           Consumer<AIPlayerEntity> perTick, Predicate<TaskStatus> assertion) {
-            return new Result(feature, false, "running", true, timeoutTicks, true, false, false, assertion, perTick);
+            return new Result(feature, false, "running", true, timeoutTicks, true, false, false,
+                    assertion, perTick, NO_CLEANUP);
         }
 
         // 反向场景工厂:期望任务在 timeoutTicks 内**干净 FAILED**——这才算 PASS(detail 带失败原因+耗时);
@@ -3202,14 +3268,16 @@ public final class AIBotVerifySubcommand {
         // 防止寻路退化成无限重试空转(实操里空转比报错伤得多:看着在干活,实际整局假死)。
         // assertion 在 expectFail 语义下不参与判定,占位恒 false 防误用。
         private static Result runningExpectCleanFail(String feature, int timeoutTicks) {
-            return new Result(feature, false, "running", true, timeoutTicks, false, true, false, ignored -> false, NO_TICK);
+            return new Result(feature, false, "running", true, timeoutTicks, false, true, false,
+                    ignored -> false, NO_TICK, NO_CLEANUP);
         }
 
         // patient(耐心)工厂:R2 LLM 全链层专用。大脑会话式驱动下单任务 COMPLETED/FAILED 都不是终局
         // (会连续派发任务/失败重试/空闲思考),pollActive 对 patient 跳过全部终局判定,
         // 只认"世界状态断言达成"(PASS,completed in X ticks)或超时(abort+FAIL,detail 带最后任务状态)。
         private static Result runningPatient(String feature, int timeoutTicks, Predicate<TaskStatus> assertion) {
-            return new Result(feature, false, "running", true, timeoutTicks, false, false, true, assertion, NO_TICK);
+            return new Result(feature, false, "running", true, timeoutTicks, false, false, true,
+                    assertion, NO_TICK, NO_CLEANUP);
         }
     }
 }

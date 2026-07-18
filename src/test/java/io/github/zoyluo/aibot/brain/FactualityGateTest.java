@@ -43,6 +43,18 @@ class FactualityGateTest {
     }
 
     @Test
+    void rejectsBareFinishEvenWhenEarlierWorkIsStillRunning() {
+        FactualityGate.Context context = new FactualityGate.Context(
+                "去标记处砍一棵树", true, false, true, true);
+
+        FactualityGate.FinishDecision decision = FactualityGate.reviewFinish(
+                context, "我去砍树。"
+        );
+
+        assertFalse(decision.allowed());
+    }
+
+    @Test
     void rewritesActiveGatherCompletionToVerifiedProgress() {
         FactualityGate.Context context = new FactualityGate.Context(
                 "去标记处收集一块橡木", true, true, true, false);
@@ -54,6 +66,34 @@ class FactualityGateTest {
         assertTrue(decision.allowed());
         assertTrue(decision.rewritten());
         assertEquals("还在收集，拿到手我再告诉你。", decision.speech());
+    }
+
+    @Test
+    void taskAssignmentIsNotCompletionEvidence() {
+        FactualityGate.Context context = new FactualityGate.Context(
+                "去标记处砍一棵树", true, true, false, false,
+                true, false, false);
+
+        FactualityGate.FinishDecision decision = FactualityGate.reviewFinish(
+                context, "已经挖掉标记处的树，拿到木头。"
+        );
+
+        assertTrue(decision.allowed());
+        assertTrue(decision.rewritten());
+        assertEquals("还在收集，拿到手我再告诉你。", decision.speech());
+    }
+
+    @Test
+    void taskCompletionCanOnlyBeClaimedAfterTheTaskManagerConfirmsIt() {
+        FactualityGate.Context context = new FactualityGate.Context(
+                "去标记处砍一棵树", true, true, false, false,
+                true, true, false);
+
+        FactualityGate.FinishDecision decision = FactualityGate.reviewFinish(
+                context, "已经挖掉标记处的树，拿到木头。"
+        );
+
+        assertFalse(decision.rewritten());
     }
 
     @Test
@@ -90,6 +130,10 @@ class FactualityGateTest {
         assertFalse(FactualityGate.isPhysicalCommand("给我讲个笑话"));
         assertFalse(FactualityGate.isPhysicalCommand("钻石应该怎么挖？"));
         assertTrue(FactualityGate.isPhysicalCommand("帮我挖三块钻石可以吗？"));
+        assertTrue(FactualityGate.requiresActionDispatch("给你分配任务，处理一下附近的树"));
+        assertTrue(FactualityGate.requiresActionDispatch("去标记处砍一棵树"));
+        assertFalse(FactualityGate.requiresActionDispatch("继续"));
+        assertFalse(FactualityGate.requiresActionDispatch("任务完成了吗？"));
         assertTrue(FactualityGate.isStatusQuestion("挖完了吗？"));
         assertTrue(FactualityGate.isInformationalQuestion("钻石应该怎么挖？"));
 
@@ -98,5 +142,14 @@ class FactualityGateTest {
         assertFalse(FactualityGate.isActionTool("finish"));
         assertFalse(FactualityGate.isActionTool("scan_surroundings"));
         assertFalse(FactualityGate.isActionTool("get_task_status"));
+    }
+
+    @Test
+    void blocksUnbackedPromisesButAllowsARealClarification() {
+        FactualityGate.Context context = new FactualityGate.Context(
+                "去标记处砍一棵树", true, false, false, false);
+
+        assertTrue(FactualityGate.isUnbackedActionCommitment(context, "好，我马上去砍。"));
+        assertFalse(FactualityGate.isUnbackedActionCommitment(context, "标记在哪个位置？"));
     }
 }

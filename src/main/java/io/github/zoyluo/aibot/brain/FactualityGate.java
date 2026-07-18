@@ -38,8 +38,18 @@ final class FactualityGate {
             boolean fromOwner,
             boolean actionDispatched,
             boolean runningWork,
-            boolean activeGoal
+            boolean activeGoal,
+            boolean taskDispatched,
+            boolean taskCompleted,
+            boolean taskFailed
     ) {
+        Context(String request,
+                boolean fromOwner,
+                boolean actionDispatched,
+                boolean runningWork,
+                boolean activeGoal) {
+            this(request, fromOwner, actionDispatched, runningWork, activeGoal, false, false, false);
+        }
     }
 
     record SpeechDecision(String speech, boolean rewritten) {
@@ -55,8 +65,11 @@ final class FactualityGate {
     }
 
     static FinishDecision reviewFinish(Context context, String summary) {
-        boolean physicalCommand = context.fromOwner() && isPhysicalCommand(context.request());
-        if (physicalCommand && !context.actionDispatched() && !context.runningWork() && !context.activeGoal()) {
+        boolean actionRequest = context.fromOwner() && requiresActionDispatch(context.request());
+        // A task already running from an earlier turn is not evidence that this new request was
+        // accepted. The current turn must either dispatch work or explicitly ask for missing
+        // information; otherwise a bare finish turns an oral promise into a silent no-op.
+        if (actionRequest && !context.actionDispatched() && !isClarificationRequest(summary)) {
             return FinishDecision.rejected(summary);
         }
         SpeechDecision speech = reviewSpeech(context, summary);
@@ -69,18 +82,39 @@ final class FactualityGate {
             return new SpeechDecision(speech, false);
         }
 
-        boolean physicalCommand = context.fromOwner() && isPhysicalCommand(context.request());
+        boolean physicalCommand = context.fromOwner() && requiresActionDispatch(context.request());
         boolean relevantStatusQuestion = context.fromOwner()
                 && isStatusQuestion(context.request())
                 && context.runningWork();
+        boolean completionConfirmed = context.actionDispatched()
+                && context.taskCompleted()
+                && !context.activeGoal();
         boolean unfinished = context.activeGoal()
+                || (context.taskDispatched() && !completionConfirmed)
                 || (context.runningWork()
                 && (physicalCommand || context.actionDispatched() || relevantStatusQuestion))
-                || (physicalCommand && !context.actionDispatched());
+                || (physicalCommand && !context.actionDispatched())
+                || (physicalCommand && context.taskFailed());
         if (!unfinished) {
             return new SpeechDecision(speech, false);
         }
-        return new SpeechDecision(progressSpeech(context.request(), context.runningWork() || context.activeGoal()), true);
+        if (physicalCommand && context.taskFailed()) {
+            return new SpeechDecision("这一步没做成，我先查卡在哪。", true);
+        }
+        return new SpeechDecision(progressSpeech(context.request(),
+                context.runningWork() || context.activeGoal() || context.taskDispatched()), true);
+    }
+
+    /** A verbal promise is not an execution result and must never become the only visible outcome. */
+    static boolean isUnbackedActionCommitment(Context context, String raw) {
+        if (context == null || !context.fromOwner() || !requiresActionDispatch(context.request())
+                || context.actionDispatched() || isClarificationRequest(raw)) {
+            return false;
+        }
+        String text = raw == null ? "" : raw.strip().toLowerCase(Locale.ROOT);
+        return containsAny(text,
+                "我去", "我会", "我来", "我先", "我马上", "我立刻", "我现在", "我开始",
+                "马上去", "立刻去", "现在去", "开始干", "开始做", "出发", "动手");
     }
 
     static boolean containsCompletionClaim(String raw) {
@@ -166,6 +200,36 @@ final class FactualityGate {
                 "去采", "去收", "去建", "去盖", "去杀", "放烟花");
     }
 
+    /** Whether this owner message needs a real action result in the current turn. */
+    static boolean requiresActionDispatch(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return false;
+        }
+        String text = raw.strip().toLowerCase(Locale.ROOT);
+        if (isStatusQuestion(text) || isInformationalQuestion(text) || isContinuationRequest(text)) {
+            return false;
+        }
+        if (isStopRequest(text) || isPhysicalCommand(text)) {
+            return true;
+        }
+        // Step often receives a natural assignment without a concrete Minecraft verb, for example
+        // "给你分配个任务，处理一下". Treat those as work requests too, so it cannot just promise.
+        return containsAny(text,
+                "分配任务", "给你任务", "这个任务", "帮我处理", "请你处理", "麻烦处理",
+                "替我处理", "执行一下", "执行这个", "去做", "做一下", "弄一下", "搞一下", "开始干");
+    }
+
+    static boolean isClarificationRequest(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return false;
+        }
+        String text = raw.strip().toLowerCase(Locale.ROOT);
+        return text.endsWith("?") || text.endsWith("？")
+                || containsAny(text,
+                "请标记", "标一下", "给个坐标", "告诉我位置", "具体位置", "哪个位置",
+                "哪一棵", "哪一个", "不清楚", "看不清", "需要什么材料", "请说明");
+    }
+
     static boolean isStatusQuestion(String raw) {
         if (raw == null || raw.isBlank()) {
             return false;
@@ -175,6 +239,11 @@ final class FactualityGate {
                 "进度", "状态", "到哪了", "到哪儿了", "还要多久", "做完没", "做完了吗",
                 "完成没", "完成了吗", "砍完没", "砍完了吗", "挖完没", "挖完了吗",
                 "拿到没", "拿到了吗", "收集完没", "好了没", "成功没", "失败了吗");
+    }
+
+    private static boolean isContinuationRequest(String text) {
+        return text.startsWith("继续") || text.startsWith("接着") || text.startsWith("接着干")
+                || text.startsWith("continue") || text.startsWith("resume");
     }
 
     static boolean isActionTool(String toolName) {
