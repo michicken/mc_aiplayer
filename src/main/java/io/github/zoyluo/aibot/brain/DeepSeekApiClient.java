@@ -31,6 +31,15 @@ public final class DeepSeekApiClient {
     }
 
     public ChatResponse chat(List<ChatMessage> history, List<ToolDefinition> tools) throws DeepSeekApiException {
+        return chat(history, tools, config.maxTokens(), config.temperature(), "primary");
+    }
+
+    /** All lanes keep the configured Step model; only their output budget and audit label differ. */
+    public ChatResponse chat(List<ChatMessage> history,
+                             List<ToolDefinition> tools,
+                             int maxTokens,
+                             double temperature,
+                             String lane) throws DeepSeekApiException {
         if (config.apiKey() == null || config.apiKey().isBlank()) {
             throw new DeepSeekApiException("deepseek_api_key_missing");
         }
@@ -42,8 +51,8 @@ public final class DeepSeekApiClient {
             body.add("tools", serializeTools(tools));
             body.addProperty("tool_choice", "auto");
         }
-        body.addProperty("max_tokens", config.maxTokens());
-        body.addProperty("temperature", config.temperature());
+        body.addProperty("max_tokens", Math.max(64, maxTokens));
+        body.addProperty("temperature", temperature);
         body.addProperty("stream", false);
         if (config.thinkingDisabled()) {
             // 双通道兼容: DeepSeek 官方用 {"thinking":{"type":"disabled"}};
@@ -56,9 +65,10 @@ public final class DeepSeekApiClient {
         }
         BotLog.api(null, "api_request",
                 "model", config.model(),
+                "lane", lane == null ? "primary" : lane,
                 "msg_count", history.size(),
                 "tools_count", tools == null ? 0 : tools.size(),
-                "max_tokens", config.maxTokens());
+                "max_tokens", Math.max(64, maxTokens));
 
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(normalizedBaseUrl() + "/v1/chat/completions"))

@@ -6,6 +6,7 @@ import io.github.zoyluo.aibot.entity.AIPlayerEntity;
 import io.github.zoyluo.aibot.manager.AIPlayerManager;
 import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Vec3d;
 
 import java.util.Optional;
 import java.util.UUID;
@@ -25,10 +26,11 @@ import java.util.UUID;
  * 追杀是主动指令,由 LongRunningIntentManager 之外的显式 stop 结束。
  */
 public final class ChaseAttackTask extends AbstractTask {
-    private static final double APPROACH_START = 3.2D;  // 超过这个距离就寻路逼近(略大于攻击距离,避免抖动)
     private static final int REPATH_TICKS = 20;         // 追人比 follow 更频繁重规划,目标在跑
     private static final double PROGRESS_EPS = 0.4D;     // 一个重规划周期内至少靠近这么多才算"在推进"
-    private static final int UNREACHABLE_LIMIT = 80;     // 连续 4s 逼近但没靠近 → 判定够不到,转待命喊话
+    private static final int UNREACHABLE_LIMIT = 80;     // 连续 4s 没有真实位移 → 短暂等待后换路重试
+    private static final double RETARGET_SHIFT_SQ = 9.0D;
+    private static final int UNREACHABLE_RETRY_TICKS = 100;
     private final UUID targetUuid;
     private final String targetLabel;
     private int nextRepathTick;
@@ -36,6 +38,9 @@ public final class ChaseAttackTask extends AbstractTask {
     private double lastDistToTarget = Double.MAX_VALUE;
     private int noApproachTicks;   // 连续"想追却没靠近"的 tick 数
     private boolean waiting;       // true → StuckWatcher 豁免本任务(追不到时不被判 stuck 中止)
+    private BlockPos unreachableTargetPos;
+    private int nextUnreachableRetryTick;
+    private Vec3d lastChasePos;
 
     public ChaseAttackTask(UUID targetUuid, String targetLabel) {
         this.targetUuid = targetUuid;
@@ -49,7 +54,7 @@ public final class ChaseAttackTask extends AbstractTask {
 
     @Override
     public String describe() {
-        return "Chasing and attacking " + targetLabel + (waiting ? " (unreachable, taunting)" : "");
+        return "Chasing and attacking " + targetLabel + (waiting ? " (route blocked, retrying)" : "");
     }
 
     @Override
@@ -72,6 +77,9 @@ public final class ChaseAttackTask extends AbstractTask {
         lastDistToTarget = Double.MAX_VALUE;
         noApproachTicks = 0;
         waiting = false;
+        unreachableTargetPos = null;
+        nextUnreachableRetryTick = 0;
+        lastChasePos = null;
     }
 
     @Override
@@ -98,14 +106,28 @@ public final class ChaseAttackTask extends AbstractTask {
             waiting = false;
             noApproachTicks = 0;
             lastDistToTarget = distance;
+            unreachableTargetPos = null;
+            lastChasePos = bot.getPos();
             return;
         }
 
         // 够不到就追。优先走 A* 寻路(startPathTo → 背包有方块时会 PILLAR_UP 垫方块爬上高处的你),
         // 只有寻路彻底失败(idle 且不在冷却)才短暂直线兜底。绝不像旧版那样一 idle 就直线——直线不搭方块。
         BlockPos targetPos = target.getBlockPos();
+        if (waiting) {
+            boolean targetChanged = unreachableTargetPos == null
+                    || unreachableTargetPos.getSquaredDistance(targetPos) > RETARGET_SHIFT_SQ;
+            if (!targetChanged && elapsed < nextUnreachableRetryTick) {
+                return;
+            }
+            waiting = false;
+            noApproachTicks = 0;
+            lastDistToTarget = distance;
+            lastChasePos = bot.getPos();
+            nextRepathTick = elapsed;
+        }
         BlockPos activeGoal = bot.getActionPack().activePathGoal();
-        boolean targetMoved = activeGoal == null || activeGoal.getSquaredDistance(targetPos) > 4.0D;
+        boolean targetMoved = activeGoal == null || activeGoal.getSquaredDistance(targetPos) > RETARGET_SHIFT_SQ;
         if (elapsed >= nextRepathTick && (bot.getActionPack().isPathExecutorIdle() || targetMoved)) {
             var result = bot.getActionPack().startPathTo(target.getBlockPos());
             nextRepathTick = elapsed + REPATH_TICKS;
@@ -115,24 +137,27 @@ public final class ChaseAttackTask extends AbstractTask {
             }
         }
 
-        // 追不上判定:每个重规划周期检查是否真的在靠近目标。连续 UNREACHABLE_LIMIT tick 没靠近
-        // → 判定"够不到"(你站在它爬不上的地方),转待命 + 隔一会儿喊一句,不再原地卡死被 stuck 中止。
+        // Only real movement, distance gain, or a stationary construction/mining node counts as
+        // progress. Merely owning a PathExecutor used to hide a route that was physically stuck.
         if (elapsed % REPATH_TICKS == 0) {
-            if (!bot.getActionPack().isPathExecutorIdle() || distance < lastDistToTarget - PROGRESS_EPS) {
+            Vec3d now = bot.getPos();
+            boolean physicallyMoving = lastChasePos == null || now.distanceTo(lastChasePos) > 0.5D;
+            boolean closing = distance < lastDistToTarget - PROGRESS_EPS;
+            if (physicallyMoving || closing || bot.getActionPack().isNavigationWorkingStationary()) {
                 noApproachTicks = 0;
                 waiting = false;
             } else {
                 noApproachTicks += REPATH_TICKS;
             }
             lastDistToTarget = distance;
+            lastChasePos = now;
         }
         if (noApproachTicks >= UNREACHABLE_LIMIT) {
-            if (!waiting) {
-                waiting = true; // 首次转待命
-            }
-            if (elapsed % 60 == 0) {
-                BrainCoordinator.INSTANCE.sendPanelChat(bot, "bot", "你给我下来！躲上去算什么本事！");
-            }
+            bot.getActionPack().stopAll();
+            waiting = true;
+            unreachableTargetPos = targetPos.toImmutable();
+            nextUnreachableRetryTick = elapsed + UNREACHABLE_RETRY_TICKS;
+            noApproachTicks = 0;
         }
     }
 

@@ -39,6 +39,8 @@ public final class HuntTask extends AbstractTask {
     private static final int MAX_PREY_ROAMS = 10;      // 找不到猎物时漫游换片的最多次数(目标量大时多找几片)
     private static final int ROAM_DISTANCE = 32;       // 每次漫游的水平距离
     private static final int UNREACHABLE_PREY_COOLDOWN = 200; // 卡住的同一猎物 10s 内不重新锁定
+    private static final int APPROACH_REPATH_TICKS = 30;
+    private static final double APPROACH_RETARGET_SHIFT_SQ = 9.0D;
 
     // 可食用猎物及其生肉掉落(烤熟前先拿到生肉)。
     private static final Set<EntityType<?>> PREY = Set.of(
@@ -62,6 +64,7 @@ public final class HuntTask extends AbstractTask {
     private final BlockMiner obstacleMiner = new BlockMiner(); // 接近时挖掉眼前挡路的方块(树叶/草/泥)
     private boolean clearingObstacle;  // 正在挖挡路方块
     private final Map<Integer, Integer> unreachablePreyUntil = new HashMap<>();
+    private int nextApproachRepathTick;
 
     public HuntTask(int targetMeat) {
         this.targetMeat = Math.max(1, targetMeat);
@@ -103,6 +106,7 @@ public final class HuntTask extends AbstractTask {
         roamCount = 0;
         clearingObstacle = false;
         unreachablePreyUntil.clear();
+        nextApproachRepathTick = 0;
         phase = Phase.ACQUIRE;
         surfaceIfUnderground(bot);
     }
@@ -185,7 +189,7 @@ public final class HuntTask extends AbstractTask {
         clearingObstacle = false;
         obstacleMiner.cancel(bot);
         lastProgressTick = elapsed;
-        CombatCore.startApproach(bot, target);
+        requestApproach(bot);
     }
 
     private void acquire(AIPlayerEntity bot) {
@@ -309,7 +313,7 @@ public final class HuntTask extends AbstractTask {
             clearingObstacle = false;
             approachStuckPos = null;
             lastProgressTick = elapsed;
-            CombatCore.startApproach(bot, target);   // 清完通路重新寻路追
+            requestApproach(bot);   // 清完通路重新寻路追
             return;
         }
         // 卡住检测:站位连续不变即视为被方块挡住 / 追不上。
@@ -348,10 +352,23 @@ public final class HuntTask extends AbstractTask {
         }
         approachStuckPos = at;
         approachStuckTick = elapsed;
-        if (bot.getActionPack().isPathExecutorIdle() && bot.getActionPack().isWalkToIdle()) {
-            CombatCore.startApproach(bot, target);
+        BlockPos activeGoal = bot.getActionPack().activePathGoal();
+        boolean targetMoved = activeGoal != null
+                && activeGoal.getSquaredDistance(target.getBlockPos()) > APPROACH_RETARGET_SHIFT_SQ;
+        if (elapsed >= nextApproachRepathTick
+                && ((bot.getActionPack().isPathExecutorIdle() && bot.getActionPack().isWalkToIdle())
+                || targetMoved)) {
+            requestApproach(bot);
             lastProgressTick = elapsed; // 重新起步追击也算进展
         }
+    }
+
+    private void requestApproach(AIPlayerEntity bot) {
+        if (target == null || !target.isAlive()) {
+            return;
+        }
+        CombatCore.startApproach(bot, target);
+        nextApproachRepathTick = elapsed + APPROACH_REPATH_TICKS;
     }
 
     // 朝猎物方向(approach 已 lookAt,bot 朝向即猎物方向)前方挡路的、可挖的方块:脚位或头位的固体

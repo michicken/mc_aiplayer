@@ -101,7 +101,7 @@ public record AIBotConfig(
                 new Perception(16, 20, 10, 10, false),
                 // 任务进度仍在 HUD 和状态面板可见；默认不把每个 25% 的机械播报塞进聊天流，
                 // 让模型只在真正有话要说或需要解释失败时开口。
-                new Brain(36, 6, 12, false, true, false, 3, false, false, true),
+                new Brain(36, 6, 12, false, true, false, 3, false, false, true, true),
                 new Watchdog(120), // 200t(10s)发呆才判卡太钝,120t(6s)更快触发恢复(实例 config 里的旧值 200 部署时须同步改)
                 new Logging(true, "logs/aibot", true, "daily", 50, 30, true, Map.of(
                         "LIFECYCLE", "INFO",
@@ -180,7 +180,8 @@ public record AIBotConfig(
             int maxTaskRetries,
             Boolean verboseReports,
             Boolean exposeAdvancedTools, // false(默认)=strip_mine/mine_vein/set_goal 不暴露给模型(弱模型误选诱饵),命令行不受影响
-            Boolean ownerEventPush       // true(默认)=主人被打且 bot 未在护卫时,节流喂大脑一条警报事件
+            Boolean ownerEventPush,      // true(默认)=主人被打且 bot 未在护卫时,节流喂大脑一条警报事件
+            Boolean parallelAdvisors     // true=主人行动指令先并行跑五条只读 Step 顾问轨道
     ) {
         Brain withDefaults(Brain defaults) {
             return new Brain(
@@ -193,7 +194,8 @@ public record AIBotConfig(
                     positiveOrDefault(maxTaskRetries, defaults.maxTaskRetries),
                     boolOrDefault(verboseReports, defaults.verboseReports),
                     boolOrDefault(exposeAdvancedTools, defaults.exposeAdvancedTools),
-                    boolOrDefault(ownerEventPush, defaults.ownerEventPush));
+                    boolOrDefault(ownerEventPush, defaults.ownerEventPush),
+                    boolOrDefault(parallelAdvisors, defaults.parallelAdvisors));
         }
 
         public boolean exposesLowLevelTools() {
@@ -218,6 +220,10 @@ public record AIBotConfig(
 
         public boolean ownerEventPushEnabled() {
             return Boolean.TRUE.equals(ownerEventPush);
+        }
+
+        public boolean parallelAdvisorsEnabled() {
+            return Boolean.TRUE.equals(parallelAdvisors);
         }
     }
 

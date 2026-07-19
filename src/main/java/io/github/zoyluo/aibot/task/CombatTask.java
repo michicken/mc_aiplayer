@@ -30,7 +30,8 @@ public final class CombatTask extends AbstractTask {
     private static final int BOW_CHARGE_TICKS = 20;
     private static final int BLOCK_TICKS = 12;
     private static final int HEAL_WAIT_TICKS = 200;
-    private static final int LOST_SIGHT_LIMIT = 50; // 目标被墙挡住(无视线)持续 2.5s → 结束战斗,不傻打到 timeout
+    private static final int APPROACH_REPATH_TICKS = 30;
+    private static final double APPROACH_RETARGET_SHIFT_SQ = 9.0D;
 
     private final EntityType<?> targetType;
     private final int targetKills;
@@ -47,6 +48,7 @@ public final class CombatTask extends AbstractTask {
     private boolean eating;
     private int lostSightTicks; // 目标连续无视线(被墙挡)的 tick 数
     private int returningTicks;  // 牵引触发后往主人身边走的 tick 数
+    private int nextApproachRepathTick;
 
     public CombatTask(EntityType<?> targetType, int targetKills, float retreatHpThreshold) {
         this(targetType, targetKills, retreatHpThreshold, null, 0.0D);
@@ -82,6 +84,7 @@ public final class CombatTask extends AbstractTask {
         CombatCore.equipMelee(bot);
         EquipAction.equipShieldOffhand(bot);
         phase = Phase.ACQUIRE;
+        nextApproachRepathTick = 0;
     }
 
     @Override
@@ -149,7 +152,11 @@ public final class CombatTask extends AbstractTask {
             phase = Phase.STRIKE;
             return;
         }
-        if (bot.getActionPack().isPathExecutorIdle() && elapsed > 10) {
+        net.minecraft.util.math.BlockPos activeGoal = bot.getActionPack().activePathGoal();
+        boolean targetMoved = activeGoal != null
+                && activeGoal.getSquaredDistance(target.getBlockPos()) > APPROACH_RETARGET_SHIFT_SQ;
+        if (elapsed >= nextApproachRepathTick
+                && (bot.getActionPack().isPathExecutorIdle() || targetMoved)) {
             startApproach(bot);
         }
     }
@@ -305,14 +312,21 @@ public final class CombatTask extends AbstractTask {
             complete(); // 已经回到主人身边(或兜底超时):干净结束,让 follow/guard 等背景任务 resume
             return true;
         }
-        if (bot.getActionPack().isPathExecutorIdle()) {
+        net.minecraft.util.math.BlockPos ownerPos = owner.getBlockPos();
+        net.minecraft.util.math.BlockPos activeGoal = bot.getActionPack().activePathGoal();
+        boolean ownerMoved = activeGoal != null
+                && activeGoal.getSquaredDistance(ownerPos) > APPROACH_RETARGET_SHIFT_SQ;
+        if (elapsed >= nextApproachRepathTick
+                && (bot.getActionPack().isPathExecutorIdle() || ownerMoved)) {
             bot.getActionPack().startPathTo(owner.getBlockPos());
+            nextApproachRepathTick = elapsed + APPROACH_REPATH_TICKS;
         }
         return true;
     }
 
     private void startApproach(AIPlayerEntity bot) {
         CombatCore.startApproach(bot, target);
+        nextApproachRepathTick = elapsed + APPROACH_REPATH_TICKS;
     }
 
     private void chooseEngagement(AIPlayerEntity bot) {

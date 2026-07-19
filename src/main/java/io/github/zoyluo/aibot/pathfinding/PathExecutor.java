@@ -24,10 +24,13 @@ public final class PathExecutor {
     private static final int STUCK_TICKS_LIMIT = 60;
     private static final int REPLAN_COOLDOWN_TICKS = 40;
     private static final int DIG_APPROACH_TICKS_LIMIT = 80;
+    private static final int WATER_DIG_RECOVERY_TICKS = 40;
 
     private List<Node> path;
     private int index = 1;
     private final BlockPos originalGoal;
+    private final boolean replanCanPillar;
+    private final boolean replanAllowDig;
     private WalkToController subWalker;
     private WalkToController approachWalker;
     private int approachTicks;
@@ -43,10 +46,17 @@ public final class PathExecutor {
     private int nodeRetry;
     private int buildRetries;
     private int nodeActionTicks;
+    private int waterDigRecoveryTicks;
 
     public PathExecutor(List<Node> path, BlockPos originalGoal) {
+        this(path, originalGoal, true, true);
+    }
+
+    public PathExecutor(List<Node> path, BlockPos originalGoal, boolean replanCanPillar, boolean replanAllowDig) {
         this.path = List.copyOf(path);
         this.originalGoal = originalGoal.toImmutable();
+        this.replanCanPillar = replanCanPillar;
+        this.replanAllowDig = replanAllowDig;
     }
 
     public ActionResult tick(ActionPack pack) {
@@ -159,15 +169,24 @@ public final class PathExecutor {
         if (++nodeActionTicks > 800) {
             return handleStuck(pack, "dig_node_timeout");
         }
-        // WATER-5:湿身不挖(同 DigNav)。在水里执行挖掘节点=沿水位线无限啃岸/挖穿放水,
-        // 先交给 handleStuck 走一次替代路线重规划,不行就把失败上抛给任务层。
+        // A stale route can still reach a DIG node while the player is being pushed through water.
+        // Surface briefly before giving up; immediate replan used to recreate the same water->DIG
+        // route every five ticks. New routes no longer generate DIG directly from water cells.
         if (pack.player().isTouchingWater()) {
             if (subMiner != null) {
                 subMiner.abort(pack.player());
                 subMiner = null;
             }
+            approachWalker = null;
+            pack.stopMovement();
+            pack.setJumping(true);
+            if (++waterDigRecoveryTicks <= WATER_DIG_RECOVERY_TICKS) {
+                return ActionResult.IN_PROGRESS;
+            }
+            pack.setJumping(false);
             return handleStuck(pack, "dig_in_water");
         }
+        waterDigRecoveryTicks = 0;
         if (!digWalking) {
             // 头号实测卡死根因(81/90 次 path_stuck 全是 out_of_reach):路径拉直/推进后挖掘节点常离身位
             // >reach,直接建 MiningController 立即失败 → replan 常拿同一条路 → replan_throttled 任务挂。
@@ -391,6 +410,7 @@ public final class PathExecutor {
         nodeRetry = 0;
         buildRetries = 0;
         nodeActionTicks = 0;
+        waterDigRecoveryTicks = 0;
         replanTried = false;
     }
 
@@ -499,8 +519,16 @@ public final class PathExecutor {
                 cleanup(pack);
                 return ActionResult.failed(reason + "; replan_failed: NO_START");
             }
-            boolean canPillar = hasPlaceableBlock(pack.player());
-            AStarPathfinder finder = new AStarPathfinder(pack.player().getServerWorld(), pack.player().getBlockPos(), originalGoal, canPillar);
+            boolean canPillar = replanCanPillar && hasPlaceableBlock(pack.player());
+            AStarPathfinder finder = new AStarPathfinder(
+                    pack.player().getServerWorld(),
+                    pack.player().getBlockPos(),
+                    originalGoal,
+                    10_000,
+                    AStarPathfinder.dynamicBudgetMillis(),
+                    canPillar,
+                    replanAllowDig,
+                    4.0D);
             PathfindingResult fresh = finder.findPath();
             if (fresh.success()) {
                 BotLog.path(pack.player(), "path_replan", "at_node", reason, "new_path_size", fresh.path().size());
@@ -514,9 +542,12 @@ public final class PathExecutor {
                 digWalking = false;
                 buildRetries = 0;
                 nodeActionTicks = 0;
+                waterDigRecoveryTicks = 0;
                 stuckTicks = 0;
                 lastPos = null;
-                replanTried = false;
+                // Keep the one-replan guard until a node is actually advanced. If the fresh route
+                // fails at the same first node, fail upward and let ActionPack's durable backoff
+                // handle it instead of spinning another identical A* search immediately.
                 return ActionResult.IN_PROGRESS;
             }
             reason = reason + "; replan_failed: " + fresh.reason();
@@ -534,6 +565,7 @@ public final class PathExecutor {
         approachWalker = null;
         approachTicks = 0;
         parkourTicks = 0;
+        waterDigRecoveryTicks = 0;
         digWalking = false;
         pack.stopMovement();
     }

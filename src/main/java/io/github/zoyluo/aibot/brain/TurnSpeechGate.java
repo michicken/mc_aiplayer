@@ -15,4 +15,8 @@ final class TurnSpeechGate {
     synchronized void reset() {
         reserved = false;
     }
+
+    synchronized boolean isReserved() {
+        return reserved;
+    }
 }

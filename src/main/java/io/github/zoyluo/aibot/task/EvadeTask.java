@@ -6,6 +6,10 @@ import io.github.zoyluo.aibot.pathfinding.Standability;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
 
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
+
 public final class EvadeTask extends AbstractTask {
     private final Threat threat;
     private BlockPos escapeGoal;
@@ -135,24 +139,34 @@ public final class EvadeTask extends AbstractTask {
         // 反复被蹭血磨死。20 格出圈,一次逃干净。
         away = away.normalize().multiply(20.0D);
         BlockPos base = BlockPos.ofFloored(bot.getPos().add(away));
-        BlockPos direct = bestEscapeNear(bot, base, threatPos, 4, 0.0D);
-        if (tryStartPath(bot, direct)) {
-            return true;
-        }
-
-        // 矿洞里“离怪 20 格”的目标常正好落在实心岩壁。旧实现直接失败，DangerWatcher 下次扫描
-        // 又派同一个 EvadeTask，形成 no_valid_escape_route 刷屏。退一步：在脚下周围找一条能实质
-        // 拉开距离的安全通道，哪怕只能先撤 4~8 格，也比站在原地等下一次扫描更像真人逃跑。
         double currentDistance = horizontalDistance(bot.getPos(), threatPos);
-        BlockPos nearby = bestEscapeNear(bot, bot.getBlockPos(), threatPos, 8, currentDistance + 1.5D);
-        return tryStartPath(bot, nearby);
+        List<BlockPos> direct = escapeCandidates(bot, base, threatPos, 4, 0.0D, 2);
+        List<BlockPos> nearby = escapeCandidates(
+                bot, bot.getBlockPos(), threatPos, 8, currentDistance + 1.5D, 3);
+
+        // Underground, a point twenty blocks away is usually behind solid rock. Try an actual side
+        // passage first; outdoors, preserve the long sprint as the natural first choice.
+        boolean underground = !bot.getServerWorld().isSkyVisible(bot.getBlockPos());
+        if (underground) {
+            return tryCandidates(bot, nearby) || tryCandidates(bot, direct);
+        }
+        return tryCandidates(bot, direct) || tryCandidates(bot, nearby);
+    }
+
+    private boolean tryCandidates(AIPlayerEntity bot, List<BlockPos> candidates) {
+        for (BlockPos candidate : candidates) {
+            if (tryStartPath(bot, candidate)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private boolean tryStartPath(AIPlayerEntity bot, BlockPos candidate) {
         if (candidate == null) {
             return false;
         }
-        ActionResult result = bot.getActionPack().startPathTo(candidate);
+        ActionResult result = bot.getActionPack().startEscapePathTo(candidate);
         if (result.isFailed()) {
             return false;
         }
@@ -170,13 +184,13 @@ public final class EvadeTask extends AbstractTask {
         return Vec3d.ZERO;
     }
 
-    private static BlockPos bestEscapeNear(AIPlayerEntity bot,
-                                           BlockPos center,
-                                           Vec3d threatPos,
-                                           int radiusLimit,
-                                           double minimumThreatDistance) {
-        BlockPos best = null;
-        double bestScore = Double.NEGATIVE_INFINITY;
+    private static List<BlockPos> escapeCandidates(AIPlayerEntity bot,
+                                                   BlockPos center,
+                                                   Vec3d threatPos,
+                                                   int radiusLimit,
+                                                   double minimumThreatDistance,
+                                                   int limit) {
+        List<EscapeCandidate> ranked = new ArrayList<>();
         Vec3d botPos = bot.getPos();
         for (int radius = 0; radius <= radiusLimit; radius++) {
             for (BlockPos candidate : BlockPos.iterate(
@@ -193,13 +207,26 @@ public final class EvadeTask extends AbstractTask {
                 }
                 // Prefer getting farther from danger, then prefer a short reachable first leg.
                 double score = threatDistance * 4.0D - travelDistance * 0.15D;
-                if (score > bestScore) {
-                    best = candidate.toImmutable();
-                    bestScore = score;
-                }
+                ranked.add(new EscapeCandidate(candidate.toImmutable(), score));
             }
         }
-        return best;
+        ranked.sort(Comparator.comparingDouble(EscapeCandidate::score).reversed());
+        List<BlockPos> selected = new ArrayList<>(limit);
+        for (EscapeCandidate candidate : ranked) {
+            boolean repeatsDirection = selected.stream()
+                    .anyMatch(existing -> existing.isWithinDistance(candidate.pos(), 3.5D));
+            if (repeatsDirection) {
+                continue;
+            }
+            selected.add(candidate.pos());
+            if (selected.size() >= limit) {
+                break;
+            }
+        }
+        return selected;
+    }
+
+    private record EscapeCandidate(BlockPos pos, double score) {
     }
 
     private static double horizontalDistance(Vec3d first, Vec3d second) {

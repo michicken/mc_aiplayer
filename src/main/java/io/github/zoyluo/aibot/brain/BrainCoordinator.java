@@ -104,6 +104,7 @@ public final class BrainCoordinator {
         }
         conversation.actionRecoveryAttempted = false;
         conversation.modelSpeechGate.reset();
+        conversation.advisorSpeechSuggestion = "";
         if (fromOwner && !preservesWorkEvidence) {
             // 真人消息(gift:/danmaku:/system: 都带冒号前缀,玩家名不含冒号)记为"最初的完整要求",
             // task_done_wake 时回灌——治复合指令"先A再B"里 B 靠被 trim 的历史回忆导致只做一半。
@@ -122,7 +123,11 @@ public final class BrainCoordinator {
         }
         trace(bot, ">> [" + senderName + "] " + trunc(text, 60));
         io.github.zoyluo.aibot.log.ConversationLogger.INSTANCE.onUserMessage(bot.getGameProfile().getName(), senderName, text);
-        submit(bot, conversation);
+        if (shouldUseParallelAdvisors(conversation)) {
+            submitWithParallelAdvisors(bot, conversation);
+        } else {
+            submit(bot, conversation);
+        }
         return true;
     }
 
@@ -375,6 +380,7 @@ public final class BrainCoordinator {
         // A completed/failed task is a real state transition, so a final report may speak even if
         // the same request already voiced a short acknowledgement before dispatching the task.
         conversation.modelSpeechGate.reset();
+        conversation.advisorSpeechSuggestion = "";
         if (!conversation.busy || conversation.inFlight) {
             return;
         }
@@ -522,8 +528,9 @@ public final class BrainCoordinator {
             return new ModelSpeechDecision(true, text, "");
         }
         FactualityGate.Context context = factualityContext(bot, conversation);
-        if (FactualityGate.isUnbackedActionCommitment(context, text)) {
-            BotLog.comm(bot, "speech_rejected_before_action", "source", source, "text", trunc(text, 100));
+        String candidate = preferredAdvisorSpeech(conversation, text);
+        if (FactualityGate.isUnbackedActionCommitment(context, candidate)) {
+            BotLog.comm(bot, "speech_rejected_before_action", "source", source, "text", trunc(candidate, 100));
             trace(bot, "!! 先派任务，不能只口头答应");
             return new ModelSpeechDecision(false, "",
                     "action_not_dispatched: 这是主人交代的任务。先调用实际行动工具；不能只口头答应。"
@@ -536,9 +543,13 @@ public final class BrainCoordinator {
                     "already_spoke_this_turn: 本轮已经有一条有声口播。不要再调用 speak；现在调用 finish 收尾，finish 不会重复朗读。");
         }
         FactualityGate.SpeechDecision decision = FactualityGate.reviewSpeech(
-                factualityContext(bot, conversation), text);
+                factualityContext(bot, conversation), candidate);
         if (decision.rewritten()) {
-            logPrematureCompletionRewrite(bot, source, text, decision.speech());
+            logPrematureCompletionRewrite(bot, source, candidate, decision.speech());
+        }
+        if (!candidate.equals(text)) {
+            conversation.advisorSpeechSuggestion = "";
+            BotLog.comm(bot, "advisor_voice_used", "source", source);
         }
         return new ModelSpeechDecision(true, decision.speech(), "");
     }
@@ -548,20 +559,27 @@ public final class BrainCoordinator {
         if (conversation == null) {
             return new FactualityGate.FinishDecision(true, summary, "", false);
         }
+        String candidate = conversation.modelSpeechGate.isReserved()
+                ? summary
+                : preferredAdvisorSpeech(conversation, summary);
         FactualityGate.FinishDecision decision = FactualityGate.reviewFinish(
-                factualityContext(bot, conversation), summary);
+                factualityContext(bot, conversation), candidate);
         if (!decision.allowed()) {
             String event = decision.reason().startsWith("rejected_incomplete")
                     ? "finish_rejected_incomplete"
                     : "finish_rejected_no_action";
             BotLog.comm(bot, event,
                     "request", trunc(conversation.lastToolIntent, 100),
-                    "summary", trunc(summary, 100));
+                    "summary", trunc(candidate, 100));
             trace(bot, decision.reason().startsWith("rejected_incomplete")
                     ? "!! 完整要求还有下一步，拒绝 finish"
                     : "!! 还没执行行动，拒绝 finish");
         } else if (decision.rewritten()) {
-            logPrematureCompletionRewrite(bot, "finish", summary, decision.speech());
+            logPrematureCompletionRewrite(bot, "finish", candidate, decision.speech());
+        }
+        if (decision.allowed() && !candidate.equals(summary)) {
+            conversation.advisorSpeechSuggestion = "";
+            BotLog.comm(bot, "advisor_voice_used", "source", "finish");
         }
         return decision;
     }
@@ -734,22 +752,37 @@ public final class BrainCoordinator {
         String text = raw.replace('\r', ' ').replace('\n', ' ')
                 .replace("**", "").replace("`", "").replaceAll("\\s+", " ").strip();
         String[] prefixes = {"好的，", "好的。", "好的!", "好的！", "好，", "收到，", "收到。", "收到!", "收到！",
-                "明白了，", "明白，", "没问题，", "当然，"};
-        for (String prefix : prefixes) {
-            if (text.startsWith(prefix) && text.length() > prefix.length()) {
-                text = text.substring(prefix.length()).strip();
-                break;
+                "明白了，", "明白，", "没问题，", "当然，", "可以，", "放心，"};
+        boolean removed;
+        do {
+            removed = false;
+            for (String prefix : prefixes) {
+                if (text.startsWith(prefix) && text.length() > prefix.length()) {
+                    text = text.substring(prefix.length()).strip();
+                    removed = true;
+                    break;
+                }
             }
+        } while (removed);
+        if (text.startsWith("主人") && !text.startsWith("主人公") && text.length() > 2) {
+            text = text.substring(2).replaceFirst("^[，,：: ]+", "").strip();
         }
-        if (text.startsWith("我将")) {
+        if (text.startsWith("我将会")) {
+            text = "我" + text.substring(3);
+        } else if (text.startsWith("我将")) {
             text = "我" + text.substring(2);
         } else if (text.startsWith("正在为你")) {
             text = "我在" + text.substring(4);
+        } else if (text.startsWith("目前正在")) {
+            text = "还在" + text.substring(4);
+        } else if (text.startsWith("当前正在")) {
+            text = "还在" + text.substring(4);
         } else if (text.startsWith("我会先") || text.startsWith("我会去")
                 || text.startsWith("我会继续") || text.startsWith("我会马上")
                 || text.startsWith("我会试试")) {
             text = "我" + text.substring(2);
         }
+        text = text.replaceAll("[!！]{2,}", "！").replaceAll("[?？]{2,}", "？");
         return shortenSpeech(text, 70);
     }
 
@@ -787,6 +820,7 @@ public final class BrainCoordinator {
             conversation.inFlight = false;
             conversation.finishSummary = null;
             conversation.modelSpeechGate.reset();
+            conversation.advisorSpeechSuggestion = "";
         }
         BotLog.comm(bot, "turn_finished_by_finish_tool");
         trace(bot, "OK 玩家可发下一条");
@@ -794,6 +828,51 @@ public final class BrainCoordinator {
 
     public int conversationCount() {
         return conversations.size();
+    }
+
+    private boolean shouldUseParallelAdvisors(BotConversation conversation) {
+        return AIBotConfig.get().brain().parallelAdvisorsEnabled()
+                && conversation.fromOwner
+                && !conversation.currentMessagePreservesWork
+                && conversation.turnsInCurrentRequest == 0
+                && FactualityGate.requiresActionDispatch(conversation.lastToolIntent);
+    }
+
+    /**
+     * Five Step calls share one immutable history/snapshot frame. They cannot see tools and cannot
+     * mutate a task. Only after their notes are attached does the regular main lane receive tools.
+     */
+    private void submitWithParallelAdvisors(AIPlayerEntity bot, BotConversation conversation) {
+        stripStaleSnapshots(conversation);
+        stripParallelAdvisorNotes(conversation);
+        List<ChatMessage> historySnapshot = MemoryStore.INSTANCE.prepareHistory(bot, List.copyOf(conversation.history));
+        long frame = ++conversation.advisorFrame;
+        long submittedGeneration = conversation.generation;
+        conversation.inFlight = true;
+        trace(bot, "-> 并行会商(5 条 Step 顾问轨)");
+        BotLog.comm(bot, "parallel_advisors_started", "frame", frame, "lanes", 5);
+        executor.submitAdvisors(bot, ParallelBrainAdvisors.requests(historySnapshot, frame), (b, results) -> {
+            if (generationOf(b) != submittedGeneration || conversation.advisorFrame != frame) {
+                BotLog.comm(b, "stale_parallel_advisors_dropped", "frame", frame);
+                return;
+            }
+            conversation.inFlight = false;
+            PerceptionSnapshot refreshed = PerceptionCollector.collect(b);
+            conversation.lastPerceptionDigest = perceptionDigest(refreshed);
+            String digest = ParallelBrainAdvisors.mergeDigest(frame, results)
+                    + "[execution_snapshot frame=" + frame + "]\n"
+                    + refreshed.toJson();
+            conversation.history.add(ChatMessage.system(digest));
+            conversation.advisorSpeechSuggestion = ParallelBrainAdvisors.voiceSuggestion(results);
+            int successful = (int) results.stream().filter(result -> result.error().isBlank()).count();
+            BotLog.comm(b, "parallel_advisors_merged",
+                    "frame", frame,
+                    "successful", successful,
+                    "voice", !conversation.advisorSpeechSuggestion.isBlank());
+            trace(b, "<- 会商完成(" + successful + "/" + results.size() + ")，主轨执行");
+            trimHistory(conversation);
+            submit(b, conversation);
+        });
     }
 
     private void submit(AIPlayerEntity bot, BotConversation conversation) {
@@ -834,6 +913,17 @@ public final class BrainCoordinator {
                 });
     }
 
+    private static void stripParallelAdvisorNotes(BotConversation conversation) {
+        conversation.history.removeIf(message -> "system".equals(message.role())
+                && message.content() != null
+                && message.content().startsWith("[parallel_advisors frame="));
+    }
+
+    private static String preferredAdvisorSpeech(BotConversation conversation, String fallback) {
+        String suggestion = conversation.advisorSpeechSuggestion;
+        return suggestion == null || suggestion.isBlank() ? fallback : suggestion;
+    }
+
     /** 本轮请求收尾后接续处理在途期间排队的用户消息(打断时队列已清,不会复活)。 */
     private void drainPending(AIPlayerEntity bot, BotConversation conversation) {
         String[] next;
@@ -855,6 +945,7 @@ public final class BrainCoordinator {
             conversation.uncommittedTools = 0;
             conversation.continuationTaskPolls = 0;
             conversation.modelSpeechGate.reset();
+            conversation.advisorSpeechSuggestion = "";
         }
         io.github.zoyluo.aibot.goal.GoalExecutor.INSTANCE.clear(bot);
         LongRunningIntentManager.INSTANCE.clear(bot);
@@ -919,6 +1010,7 @@ public final class BrainCoordinator {
             conversation.inFlight = false;
             conversation.pendingUserMessages.clear();
             conversation.modelSpeechGate.reset();
+            conversation.advisorSpeechSuggestion = "";
         }
         awaitingTask.remove(bot.getUuid());
         BotLog.comm(bot, "brain_aborted_by_user", "generation", conversation.generation);
@@ -1375,7 +1467,7 @@ public final class BrainCoordinator {
         return """
                 你是 Minecraft 里名叫 %s 的真人玩家，正在抖音直播。全程自然地说中文，像正在玩游戏的人，不像客服、旁白或任务清单。
 
-                只做当前消息真正要求的事。问候、吐槽和问状态时只简短回答；不要无故播报、不要复述用户的话、不要说“收到/正在为您/我将”。有正在跑的任务时，主人只是聊天或问进度并不代表取消任务；只有明确说停、改、换目标才停止。
+                只做当前消息真正要求的事。问候、吐槽和问状态时只简短回答；不要无故播报、不要复述用户的话、不要说“收到/正在为您/我将”。口播只抓刚看见或刚发生的一个具体细节，没细节就少说；允许半句、停顿和普通语气，不要每句都喊。不要称呼“主人”，不要使用“主播、观众朋友们、节目效果、拉满、行为艺术、作为一个”等套话，也不要刻意证明自己像真人。有正在跑的任务时，用户只是聊天或问进度并不代表取消任务；只有明确说停、改、换目标才停止。
 
                 每个对话轮最多一句有声短话：要么调用一次 speak 后再用 finish 静默收尾，要么直接让 finish 念 summary；绝不连续 speak，也不在 speak 后重复同义 summary。行动要求先调用真正办事的工具，不要先口头答应。每次响应最多启动一个持续任务；复合要求等这一步结束再做下一步，不能用后一个任务顶掉前一个。finish 只关闭当前对话轮次，绝不代表行动或任务已经完成。派发了持续任务、目标或导航后就立即 finish 并等待系统通知，此时只能说实际状态，绝不能说“完成了/拿到了/搞定了”。只有系统明确给出任务状态 COMPLETED，且主人完整要求的每一部分都达成，才能说完成；失败要如实说卡在哪里。
 
@@ -1417,6 +1509,8 @@ public final class BrainCoordinator {
         private boolean taskDispatchedThisTurn; // 当前轮派出的长期任务未得到 COMPLETED 前，禁止任务完成口播
         private boolean actionRecoveryAttempted; // 模型没有调工具时只补一次，防止消耗额度的无穷自问
         private final TurnSpeechGate modelSpeechGate = new TurnSpeechGate(); // 每个真实对话轮最多一句模型 TTS
+        private long advisorFrame; // 共享快照代数：只合并仍属于当前 generation 的顾问结果
+        private String advisorSpeechSuggestion = ""; // 只读表达轨给当前初始调度的一句候选口播
         private final Deque<String[]> pendingUserMessages = new ArrayDeque<>(); // 在途期间的新消息,本轮结束立即接续处理
         private int lastPromptTokens;
         private int lastCompletionTokens;

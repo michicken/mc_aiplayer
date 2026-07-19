@@ -50,6 +50,33 @@ public final class Standability {
                 && !head.getFluidState().isIn(FluidTags.LAVA);
     }
 
+    /**
+     * Lifts a submerged moving target to the breathable cell at the top of its water column.
+     * Following an entity's raw, bobbing Y coordinate otherwise makes A* chase it underwater and
+     * eventually select a DIG_THROUGH node at the bank. The bot only needs the surface X/Z cell;
+     * melee and follow distance checks take over once it gets there.
+     */
+    public static Optional<BlockPos> findSurfaceSwimCell(ServerWorld world, BlockPos submerged, int maxRise) {
+        if (!world.getFluidState(submerged).isIn(FluidTags.WATER)) {
+            return Optional.empty();
+        }
+        int topY = world.getBottomY() + world.getHeight() - 2;
+        for (int dy = 0; dy <= Math.max(0, maxRise) && submerged.getY() + dy <= topY; dy++) {
+            BlockPos candidate = submerged.up(dy);
+            if (!world.getFluidState(candidate).isIn(FluidTags.WATER)) {
+                break;
+            }
+            if (isSwimmable(world, candidate)
+                    && !world.getFluidState(candidate.up()).isIn(FluidTags.WATER)) {
+                return Optional.of(candidate.toImmutable());
+            }
+            if (!world.getBlockState(candidate.up()).getCollisionShape(world, candidate.up()).isEmpty()) {
+                break;
+            }
+        }
+        return Optional.empty();
+    }
+
     public static Optional<BlockPos> findNearestStandable(ServerWorld world,
                                                           BlockPos origin,
                                                           int horizontalRadius,

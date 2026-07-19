@@ -12,6 +12,8 @@ import java.util.Optional;
 public final class GuardTask extends AbstractTask {
     private static final double GUARD_RADIUS = 10.0D;
     private static final double RETURN_DISTANCE = 5.0D;
+    private static final int REPATH_TICKS = 30;
+    private static final double RETARGET_SHIFT_SQ = 9.0D;
 
     private enum Phase {
         WATCH,
@@ -28,6 +30,8 @@ public final class GuardTask extends AbstractTask {
     private BlockPos guardPoint;
     private int repositionTicks;
     private boolean waiting;
+    private boolean announcedUnavailable;
+    private int nextRepathTick;
 
     public GuardTask(BlockPos point, String targetPlayerName) {
         this.fixedPoint = point == null ? null : point.toImmutable();
@@ -67,6 +71,8 @@ public final class GuardTask extends AbstractTask {
         guardPoint = fixedPoint == null ? bot.getBlockPos().toImmutable() : fixedPoint;
         CombatCore.equipMelee(bot);
         phase = Phase.WATCH;
+        announcedUnavailable = false;
+        nextRepathTick = 0;
     }
 
     @Override
@@ -75,11 +81,13 @@ public final class GuardTask extends AbstractTask {
         if (point == null) {
             bot.getActionPack().stopAll();
             waiting = true;
-            if (elapsed % 200 == 1) {
-                BrainCoordinator.INSTANCE.sendPanelChat(bot, "bot", "守护目标不在线或不在同一维度,我先原地警戒。");
+            if (!announcedUnavailable) {
+                announcedUnavailable = true;
+                BrainCoordinator.INSTANCE.sendPanelChat(bot, "bot", "人不在这边，我先守着。");
             }
             return;
         }
+        announcedUnavailable = false;
         guardPoint = point;
         waiting = false;
         switch (phase) {
@@ -105,7 +113,7 @@ public final class GuardTask extends AbstractTask {
         target = attacker;
         CombatCore.equipMelee(bot);
         phase = Phase.APPROACH;
-        CombatCore.startApproach(bot, attacker);
+        requestPath(bot, attacker.getBlockPos());
     }
 
     private void watch(AIPlayerEntity bot) {
@@ -113,12 +121,12 @@ public final class GuardTask extends AbstractTask {
         if (target != null) {
             CombatCore.equipMelee(bot);
             phase = Phase.APPROACH;
-            CombatCore.startApproach(bot, target);
+            requestPath(bot, target.getBlockPos());
             return;
         }
         if (bot.getBlockPos().getSquaredDistance(guardPoint) > RETURN_DISTANCE * RETURN_DISTANCE) {
             phase = Phase.RETURN;
-            bot.getActionPack().startPathTo(guardPoint);
+            requestPath(bot, guardPoint);
             return;
         }
         bot.getActionPack().stopMovement();
@@ -137,8 +145,12 @@ public final class GuardTask extends AbstractTask {
             phase = Phase.STRIKE;
             return;
         }
-        if (bot.getActionPack().isPathExecutorIdle() && elapsed > 10) {
-            CombatCore.startApproach(bot, target);
+        BlockPos activeGoal = bot.getActionPack().activePathGoal();
+        boolean targetMoved = activeGoal != null
+                && activeGoal.getSquaredDistance(target.getBlockPos()) > RETARGET_SHIFT_SQ;
+        if (elapsed >= nextRepathTick
+                && (bot.getActionPack().isPathExecutorIdle() || targetMoved)) {
+            requestPath(bot, target.getBlockPos());
         }
     }
 
@@ -150,7 +162,7 @@ public final class GuardTask extends AbstractTask {
         }
         if (bot.distanceTo(target) > CombatCore.ATTACK_RANGE + 0.75F) {
             phase = Phase.APPROACH;
-            CombatCore.startApproach(bot, target);
+            requestPath(bot, target.getBlockPos());
             return;
         }
         if (CombatCore.strikeIfReady(bot, target)) {
@@ -181,9 +193,17 @@ public final class GuardTask extends AbstractTask {
             phase = Phase.WATCH;
             return;
         }
-        if (bot.getActionPack().isPathExecutorIdle() && elapsed > 10) {
-            bot.getActionPack().startPathTo(guardPoint);
+        BlockPos activeGoal = bot.getActionPack().activePathGoal();
+        boolean pointMoved = activeGoal != null && activeGoal.getSquaredDistance(guardPoint) > RETARGET_SHIFT_SQ;
+        if (elapsed >= nextRepathTick
+                && (bot.getActionPack().isPathExecutorIdle() || pointMoved)) {
+            requestPath(bot, guardPoint);
         }
+    }
+
+    private void requestPath(AIPlayerEntity bot, BlockPos destination) {
+        bot.getActionPack().startPathTo(destination);
+        nextRepathTick = elapsed + REPATH_TICKS;
     }
 
     private BlockPos resolveGuardPoint(AIPlayerEntity bot) {

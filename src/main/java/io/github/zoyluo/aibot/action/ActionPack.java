@@ -7,6 +7,7 @@ import io.github.zoyluo.aibot.pathfinding.AStarPathfinder;
 import io.github.zoyluo.aibot.pathfinding.PathExecutor;
 import io.github.zoyluo.aibot.pathfinding.PathfindingResult;
 import io.github.zoyluo.aibot.pathfinding.MoveType;
+import io.github.zoyluo.aibot.pathfinding.NavigationRetryPolicy;
 import io.github.zoyluo.aibot.pathfinding.Standability;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
@@ -18,7 +19,9 @@ import java.util.Optional;
 
 public final class ActionPack {
     private static final int PATHFIND_SUCCESS_COOLDOWN_TICKS = 5;
-    private static final int PATHFIND_FAILURE_COOLDOWN_TICKS = 20;
+    private static final int ACTIVE_RETARGET_COOLDOWN_TICKS = 20;
+    private static final double ACTIVE_RETARGET_MIN_SHIFT_SQ = 9.0D;
+    private static final double FAILURE_GOAL_NEARBY_SQ = 9.0D;
     // NAV-OPT 两阶段寻路预算:纯步行只搜空气格(空间小,给足额度);挖穿限额更小,压住被困/地下时的 3D 体积爆搜。
     private static final int WALK_MAX_NODES = 10_000;
     private static final int DIG_MAX_NODES = 4_000;
@@ -46,6 +49,11 @@ public final class ActionPack {
     private BlockPos lastPathGoal;
     private BlockPos activePathGoal;
     private int nextPathfindTick;
+    private int lastPathStartTick = Integer.MIN_VALUE / 2;
+    private BlockPos lastFailedPathGoal;
+    private String lastPathFailureKind;
+    private int consecutivePathFailures;
+    private int pathFailureBackoffUntil;
 
     public ActionPack(AIPlayerEntity player) {
         this.player = player;
@@ -88,9 +96,13 @@ public final class ActionPack {
     }
 
     public ActionResult startWalkTo(Vec3d target) {
+        if (pathExecutor != null) {
+            pathExecutor.abort(this);
+        }
+        stopMining();
         this.walkTo = new WalkToController(target);
-        this.mining = null;
         this.pathExecutor = null;
+        this.activePathGoal = null;
         return ActionResult.IN_PROGRESS;
     }
 
@@ -110,68 +122,66 @@ public final class ActionPack {
     public ActionResult startDigPathTo(BlockPos goal) {
         int now = player.getServer().getTicks();
         BlockPos immutableGoal = goal.toImmutable();
-        if (lastPathGoal != null && lastPathGoal.equals(immutableGoal) && now < nextPathfindTick) {
-            return pathExecutor != null ? ActionResult.IN_PROGRESS : ActionResult.failed("pathfinding_throttled");
+        ActionResult gated = gatePathRequest(immutableGoal, now);
+        if (gated != null) {
+            return gated;
         }
         if (!snapPlayerToNearestStandable("path_start_invalid")) {
-            nextPathfindTick = now + PATHFIND_FAILURE_COOLDOWN_TICKS;
+            recordPathFailure(immutableGoal, "pathfinding_failed: NO_START", now);
             return ActionResult.failed("pathfinding_failed: NO_START");
         }
         int buildBlocks = MaterialPalette.countScaffoldBlocks(player);
         boolean canPillar = buildBlocks > 0;
+        boolean routeCanPillar = canPillar;
         PathfindingResult result = new AStarPathfinder(player.getServerWorld(), player.getBlockPos(), goal,
                 DIG_APPROACH_MAX_NODES, AStarPathfinder.dynamicBudgetMillis(), canPillar, true, 10.0D).findPath();
         if (requiresTooManyBlocks(result, buildBlocks)) {
+            routeCanPillar = false;
             result = new AStarPathfinder(player.getServerWorld(), player.getBlockPos(), goal,
                     DIG_APPROACH_MAX_NODES, AStarPathfinder.dynamicBudgetMillis(), false, true, 10.0D).findPath();
         }
         if (!result.success()) {
-            lastPathGoal = immutableGoal;
-            activePathGoal = null;
-            nextPathfindTick = now + PATHFIND_FAILURE_COOLDOWN_TICKS;
+            recordPathFailure(immutableGoal, "pathfinding_failed: " + result.reason(), now);
             return ActionResult.failed("pathfinding_failed: " + result.reason());
         }
-        lastPathGoal = immutableGoal;
-        nextPathfindTick = now + PATHFIND_SUCCESS_COOLDOWN_TICKS;
-        BlockPos resolvedGoal = result.resolvedGoal() == null ? immutableGoal : result.resolvedGoal();
-        activePathGoal = resolvedGoal;
-        this.pathExecutor = new PathExecutor(result.path(), resolvedGoal);
-        this.walkTo = null;
-        this.mining = null;
+        installPath(result, immutableGoal, now, routeCanPillar, true);
         return ActionResult.IN_PROGRESS;
     }
 
     public ActionResult startPathTo(BlockPos goal) {
         int now = player.getServer().getTicks();
         BlockPos immutableGoal = goal.toImmutable();
-        if (lastPathGoal != null && lastPathGoal.equals(immutableGoal) && now < nextPathfindTick) {
-            return pathExecutor != null ? ActionResult.IN_PROGRESS : ActionResult.failed("pathfinding_throttled");
+        ActionResult gated = gatePathRequest(immutableGoal, now);
+        if (gated != null) {
+            return gated;
         }
         ServerWorld world = player.getServerWorld();
         BlockPos from = player.getBlockPos();
         // A bot already following a SWIM path is valid in a water cell. Snapping it to the nearest
         // dry shore on every moving-target replan made follow/chase turn around mid-crossing.
         if (!Standability.isSwimmable(world, from) && !snapPlayerToNearestStandable("path_start_invalid")) {
-            lastPathGoal = immutableGoal;
-            activePathGoal = null;
-            nextPathfindTick = now + PATHFIND_FAILURE_COOLDOWN_TICKS;
+            recordPathFailure(immutableGoal, "pathfinding_failed: NO_START", now);
             return ActionResult.failed("pathfinding_failed: NO_START");
         }
         int buildBlocks = MaterialPalette.countScaffoldBlocks(player);
         boolean canPillar = buildBlocks > 0;
+        boolean routeCanPillar = canPillar;
         from = player.getBlockPos();
         // NAV-OPT 两阶段寻路:先纯步行(禁挖,搜索空间=空气格,收敛快、不会被挖穿邻居撑爆到 SEARCH_LIMIT);
         // 纯步行无解再允许挖穿兜底(隧道/破障),挖穿预算更小以限制被困/地下时的 3D 体积爆搜。
         PathfindingResult result = new AStarPathfinder(world, from, goal, WALK_MAX_NODES,
                 AStarPathfinder.dynamicBudgetMillis(), canPillar, false, SMART_NAV_HEURISTIC_WEIGHT).findPath();
         if (requiresTooManyBlocks(result, buildBlocks)) {
+            routeCanPillar = false;
             result = new AStarPathfinder(world, from, goal, WALK_MAX_NODES,
                     AStarPathfinder.dynamicBudgetMillis(), false, false, SMART_NAV_HEURISTIC_WEIGHT).findPath();
         }
         if (!result.success()) {
+            routeCanPillar = canPillar;
             PathfindingResult dig = new AStarPathfinder(world, from, goal, DIG_MAX_NODES,
                     AStarPathfinder.dynamicBudgetMillis(), canPillar, true, SMART_NAV_HEURISTIC_WEIGHT).findPath();
             if (requiresTooManyBlocks(dig, buildBlocks)) {
+                routeCanPillar = false;
                 dig = new AStarPathfinder(world, from, goal, DIG_MAX_NODES,
                         AStarPathfinder.dynamicBudgetMillis(), false, true, SMART_NAV_HEURISTIC_WEIGHT).findPath();
             }
@@ -180,19 +190,112 @@ public final class ActionPack {
             }
         }
         if (!result.success()) {
-            lastPathGoal = immutableGoal;
-            activePathGoal = null;
-            nextPathfindTick = now + PATHFIND_FAILURE_COOLDOWN_TICKS;
+            recordPathFailure(immutableGoal, "pathfinding_failed: " + result.reason(), now);
             return ActionResult.failed("pathfinding_failed: " + result.reason());
         }
-        lastPathGoal = immutableGoal;
-        nextPathfindTick = now + PATHFIND_SUCCESS_COOLDOWN_TICKS;
-        BlockPos resolvedGoal = result.resolvedGoal() == null ? immutableGoal : result.resolvedGoal();
-        activePathGoal = resolvedGoal;
-        this.pathExecutor = new PathExecutor(result.path(), resolvedGoal);
-        this.walkTo = null;
-        this.mining = null;
+        installPath(result, immutableGoal, now, routeCanPillar, true);
         return ActionResult.IN_PROGRESS;
+    }
+
+    /** Emergency movement never stops to mine or tower while a threat is closing in. */
+    public ActionResult startEscapePathTo(BlockPos goal) {
+        int now = player.getServer().getTicks();
+        BlockPos immutableGoal = goal.toImmutable();
+        ActionResult gated = gatePathRequest(immutableGoal, now);
+        if (gated != null) {
+            return gated;
+        }
+        ServerWorld world = player.getServerWorld();
+        BlockPos from = player.getBlockPos();
+        if (!Standability.isSwimmable(world, from) && !snapPlayerToNearestStandable("escape_path_start_invalid")) {
+            recordPathFailure(immutableGoal, "pathfinding_failed: NO_START", now);
+            return ActionResult.failed("pathfinding_failed: NO_START");
+        }
+        PathfindingResult result = new AStarPathfinder(
+                world,
+                player.getBlockPos(),
+                immutableGoal,
+                WALK_MAX_NODES,
+                AStarPathfinder.dynamicBudgetMillis(),
+                false,
+                false,
+                SMART_NAV_HEURISTIC_WEIGHT).findPath();
+        if (!result.success()) {
+            recordPathFailure(immutableGoal, "escape_path_failed: " + result.reason(), now);
+            return ActionResult.failed("pathfinding_failed: " + result.reason());
+        }
+        installPath(result, immutableGoal, now, false, false);
+        return ActionResult.IN_PROGRESS;
+    }
+
+    private ActionResult gatePathRequest(BlockPos goal, int now) {
+        if (pathExecutor != null) {
+            boolean barelyMoved = activePathGoal != null
+                    && activePathGoal.getSquaredDistance(goal) <= ACTIVE_RETARGET_MIN_SHIFT_SQ;
+            boolean justReplanned = now - lastPathStartTick < ACTIVE_RETARGET_COOLDOWN_TICKS;
+            if (barelyMoved || justReplanned) {
+                return ActionResult.IN_PROGRESS;
+            }
+        }
+        if (now < pathFailureBackoffUntil && nearby(lastFailedPathGoal, goal)) {
+            return ActionResult.failed("pathfinding_backoff");
+        }
+        if (lastPathGoal != null && lastPathGoal.equals(goal) && now < nextPathfindTick) {
+            return pathExecutor != null ? ActionResult.IN_PROGRESS : ActionResult.failed("pathfinding_throttled");
+        }
+        return null;
+    }
+
+    private void installPath(PathfindingResult result,
+                             BlockPos requestedGoal,
+                             int now,
+                             boolean replanCanPillar,
+                             boolean replanAllowDig) {
+        BlockPos resolvedGoal = result.resolvedGoal() == null ? requestedGoal : result.resolvedGoal();
+        if (pathExecutor != null) {
+            pathExecutor.abort(this);
+        }
+        stopMining();
+        if (lastFailedPathGoal != null && !nearby(lastFailedPathGoal, requestedGoal)) {
+            clearPathFailure();
+        }
+        lastPathGoal = requestedGoal;
+        nextPathfindTick = now + PATHFIND_SUCCESS_COOLDOWN_TICKS;
+        lastPathStartTick = now;
+        activePathGoal = resolvedGoal;
+        pathExecutor = new PathExecutor(result.path(), resolvedGoal, replanCanPillar, replanAllowDig);
+        walkTo = null;
+    }
+
+    private void recordPathFailure(BlockPos goal, String reason, int now) {
+        String kind = NavigationRetryPolicy.failureKind(reason);
+        boolean nearbyGoal = nearby(lastFailedPathGoal, goal);
+        consecutivePathFailures = NavigationRetryPolicy.nextFailureCount(
+                lastPathFailureKind, kind, nearbyGoal, consecutivePathFailures);
+        int cooldown = NavigationRetryPolicy.cooldownTicks(kind, consecutivePathFailures);
+        lastFailedPathGoal = goal == null ? null : goal.toImmutable();
+        lastPathFailureKind = kind;
+        pathFailureBackoffUntil = now + cooldown;
+        nextPathfindTick = Math.max(nextPathfindTick, pathFailureBackoffUntil);
+        if (goal != null) {
+            lastPathGoal = goal.toImmutable();
+        }
+        BotLog.path(player, "path_retry_backoff",
+                "kind", kind,
+                "count", consecutivePathFailures,
+                "cooldown_ticks", cooldown,
+                "goal", goal == null ? "-" : io.github.zoyluo.aibot.log.LogFields.pos(goal));
+    }
+
+    private void clearPathFailure() {
+        lastFailedPathGoal = null;
+        lastPathFailureKind = null;
+        consecutivePathFailures = 0;
+        pathFailureBackoffUntil = 0;
+    }
+
+    private static boolean nearby(BlockPos first, BlockPos second) {
+        return first != null && second != null && first.getSquaredDistance(second) <= FAILURE_GOAL_NEARBY_SQ;
     }
 
     private static boolean requiresTooManyBlocks(PathfindingResult result, int available) {
@@ -258,8 +361,13 @@ public final class ActionPack {
     }
 
     public ActionResult startMining(BlockPos pos, Direction face) {
+        if (pathExecutor != null) {
+            pathExecutor.abort(this);
+        }
+        stopMining();
         this.mining = new MiningController(pos, face);
         this.pathExecutor = null;
+        this.activePathGoal = null;
         this.forward = 0.0F;
         this.strafing = 0.0F;
         return ActionResult.IN_PROGRESS;
@@ -392,8 +500,10 @@ public final class ActionPack {
 
         if (result.isSuccess()) {
             BotLog.path(player, "path_complete", "ticks", pathExecutor.totalTicks());
+            clearPathFailure();
         } else {
             BotLog.warn(LogCategory.ERROR, player, "path_failed", "reason", result.reason());
+            recordPathFailure(activePathGoal, result.reason(), player.getServer().getTicks());
         }
         pathExecutor = null;
         activePathGoal = null;

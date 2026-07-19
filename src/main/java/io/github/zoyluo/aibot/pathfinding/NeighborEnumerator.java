@@ -49,6 +49,8 @@ public final class NeighborEnumerator {
 
     public List<NeighborCandidate> getNeighbors(BlockPos current, ServerWorld world) {
         List<NeighborCandidate> result = new ArrayList<>(HORIZONTAL.length);
+        boolean leavingWater = world.getFluidState(current)
+                .isIn(net.minecraft.registry.tag.FluidTags.WATER);
         for (Direction direction : HORIZONTAL) {
             BlockPos target = current.offset(direction);
             if (Standability.isStandable(world, target)) {
@@ -68,26 +70,26 @@ public final class NeighborEnumerator {
                 continue;
             }
 
-            if (allowDig && digEnterable(world, target)) {
+            if (!leavingWater && allowDig && digEnterable(world, target)) {
                 result.add(new NeighborCandidate(target, MoveType.DIG_THROUGH, 0));
             }
             // 斜上挖登(DIG 垂直分量之上行):目标=邻位高一格,挖开其脚头两格后跳进去。
             // 仅当自己头顶跳跃空间已空才生成(执行器只挖目标两格,不清自己头顶)——坡面/露天爬坡够用,
             // 全封闭竖井上行交给 pillar。治 geo_slope:坡体内矿(高 3 格)水平 DIG 永远够不到。
             BlockPos upTarget = target.up();
-            if (allowDig && digEnterable(world, upTarget) && collisionEmpty(world, current.up(2))) {
+            if (!leavingWater && allowDig && digEnterable(world, upTarget) && collisionEmpty(world, current.up(2))) {
                 result.add(new NeighborCandidate(upTarget, MoveType.DIG_THROUGH, 0));
             }
             // 斜向下挖成楼梯。目标脚位低一格、头位就是相邻列当前高度；挖开两格后走下去，
             // 比原地竖直下挖更安全，也让 follow/chase 能追到地下房间或矿道。
             BlockPos downTarget = target.down();
-            if (allowDig && digEnterable(world, downTarget)) {
+            if (!leavingWater && allowDig && digEnterable(world, downTarget)) {
                 result.add(new NeighborCandidate(downTarget, MoveType.DIG_THROUGH, 0));
             }
         }
         // 垂直向下挖落(DIG 垂直分量之下行):挖开脚下一格掉下去站稳。治 geo_deep/埋矿族:
         // 矿在正下方若干格,水平 DIG 在本层泛洪永远够不到(实测 ore_dig_buried/deep 同源)。
-        if (allowDig) {
+        if (allowDig && !leavingWater) {
             BlockPos below = current.down();
             if (isMineable(world, below) && !collisionEmpty(world, below.down())) {
                 result.add(new NeighborCandidate(below, MoveType.DIG_THROUGH, 0));
@@ -95,9 +97,13 @@ public final class NeighborEnumerator {
         }
         addDiagonals(current, world, result);
         addParkour(current, world, result);
-        addPillar(current, world, result);
+        if (!leavingWater) {
+            addPillar(current, world, result);
+        }
         addSwim(current, world, result);
-        addScaffold(current, world, result);
+        if (!leavingWater) {
+            addScaffold(current, world, result);
+        }
         return result;
     }
 

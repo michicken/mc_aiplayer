@@ -168,7 +168,19 @@ public final class AStarPathfinder {
     }
 
     private BlockPos resolveEndpoint(BlockPos requested, boolean startPoint) {
-        if (Standability.isStandable(world, requested) || Standability.isSwimmable(world, requested)) {
+        if (Standability.isStandable(world, requested)) {
+            return requested;
+        }
+        if (Standability.isSwimmable(world, requested)) {
+            if (!startPoint) {
+                Optional<BlockPos> surface = Standability.findSurfaceSwimCell(world, requested, 16);
+                if (surface.isPresent() && !surface.get().equals(requested)) {
+                    BotLog.path(null, "findpath_water_goal_lifted",
+                            "from", LogFields.pos(requested),
+                            "to", LogFields.pos(surface.get()));
+                    return surface.get();
+                }
+            }
             return requested;
         }
         // 挖掘模式的终点豁免(统一接近原语的钥匙):目标不可站但本身可挖(典型=被石头包裹的矿邻位)

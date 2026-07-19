@@ -12,10 +12,12 @@ public final class FollowTask extends AbstractTask {
     private static final double STOP_DISTANCE = 3.0D;
     private static final double START_DISTANCE = 4.5D;
     private static final int REPATH_TICKS = 40;
+    private static final double RETARGET_SHIFT_SQ = 9.0D;
 
     private final String targetName;
     private int nextRepathTick;
     private boolean waiting;
+    private boolean announcedUnavailable;
 
     public FollowTask(String targetName) {
         this.targetName = targetName == null ? "" : targetName.trim();
@@ -45,6 +47,7 @@ public final class FollowTask extends AbstractTask {
     protected void onStart(AIPlayerEntity bot) {
         nextRepathTick = 0;
         waiting = false;
+        announcedUnavailable = false;
     }
 
     @Override
@@ -53,11 +56,13 @@ public final class FollowTask extends AbstractTask {
         if (target == null || target.getServerWorld() != bot.getServerWorld()) {
             bot.getActionPack().stopAll();
             waiting = true;
-            if (elapsed % 200 == 1) {
-                BrainCoordinator.INSTANCE.sendPanelChat(bot, "bot", "目标玩家不在线或不在同一维度,我先原地等。");
+            if (!announcedUnavailable) {
+                announcedUnavailable = true;
+                BrainCoordinator.INSTANCE.sendPanelChat(bot, "bot", "人不在这边，我等会儿。");
             }
             return;
         }
+        announcedUnavailable = false;
         double distance = bot.distanceTo(target);
         boolean visible = CombatCore.hasLineOfSight(bot, target);
         if (distance <= STOP_DISTANCE && visible) {
@@ -68,7 +73,7 @@ public final class FollowTask extends AbstractTask {
         waiting = false;
         BlockPos targetPos = target.getBlockPos();
         BlockPos activeGoal = bot.getActionPack().activePathGoal();
-        boolean targetMoved = activeGoal == null || activeGoal.getSquaredDistance(targetPos) > 4.0D;
+        boolean targetMoved = activeGoal == null || activeGoal.getSquaredDistance(targetPos) > RETARGET_SHIFT_SQ;
         if ((distance >= START_DISTANCE || !visible) && elapsed >= nextRepathTick
                 && (bot.getActionPack().isPathExecutorIdle() || targetMoved)) {
             bot.getActionPack().startPathTo(target.getBlockPos());
