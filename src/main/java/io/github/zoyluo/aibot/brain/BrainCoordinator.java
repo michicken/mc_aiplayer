@@ -253,8 +253,9 @@ public final class BrainCoordinator {
                         "finish_reason", response.finishReason());
                 trace(bot, "! 还没派发任务，补一次实际执行请求");
                 conversation.history.add(ChatMessage.system("主人给的是需要实际执行的任务，但你刚才没有成功调用任何行动工具。"
-                        + "不要只说“我去做”或直接 finish；现在先调用一个合适的执行工具。"
-                        + "只有位置或要求确实不清楚时，才用一句明确的问题向主人确认。"));
+                        + "finish 不是确认、同意或开始任务的工具；本请求还不能调用它。"
+                        + "你的下一步必须是直接执行目标的高层行动工具，不能再 speak、scan、inventory 或 finish。"
+                        + "只有位置或要求确实不清楚时，才直接输出一句明确的问题，不调用任何工具。"));
                 trimHistory(conversation);
                 submit(bot, conversation);
                 return;
@@ -885,6 +886,17 @@ public final class BrainCoordinator {
                 BotRuntimeOptions.INSTANCE.memoryToolsEnabled(bot),
                 brainConfig.coordinationToolsEnabled(),
                 conversation.lastToolIntent);
+        if (withholdFinishAtActionStart(
+                conversation.fromOwner,
+                conversation.executionRequest,
+                conversation.actionDispatchedThisTurn,
+                conversation.modelSpeechGate.isReserved())) {
+            toolsSnapshot = toolsSnapshot.stream()
+                    .filter(tool -> !"finish".equals(tool.name()))
+                    .toList();
+            BotLog.comm(bot, "finish_withheld_for_action_start",
+                    "request", trunc(conversation.executionRequest, 100));
+        }
         BotLog.comm(bot, "tool_surface_selected",
                 "intent", trunc(conversation.lastToolIntent, 80),
                 "count", toolsSnapshot.size(),
@@ -1463,13 +1475,30 @@ public final class BrainCoordinator {
         return builder.toString();
     }
 
-    private static String systemPrompt(String botName) {
+    static boolean withholdFinishAtActionStart(boolean fromOwner,
+                                               String request,
+                                               boolean actionDispatched,
+                                               boolean alreadySpoke) {
+        return fromOwner
+                && FactualityGate.requiresActionDispatch(request)
+                && !actionDispatched
+                && !alreadySpoke;
+    }
+
+    static String systemPrompt(String botName) {
         return """
                 你是 Minecraft 里名叫 %s 的真人玩家，正在抖音直播。全程自然地说中文，像正在玩游戏的人，不像客服、旁白或任务清单。
 
                 只做当前消息真正要求的事。问候、吐槽和问状态时只简短回答；不要无故播报、不要复述用户的话、不要说“收到/正在为您/我将”。口播只抓刚看见或刚发生的一个具体细节，没细节就少说；允许半句、停顿和普通语气，不要每句都喊。不要称呼“主人”，不要使用“主播、观众朋友们、节目效果、拉满、行为艺术、作为一个”等套话，也不要刻意证明自己像真人。有正在跑的任务时，用户只是聊天或问进度并不代表取消任务；只有明确说停、改、换目标才停止。
 
-                每个对话轮最多一句有声短话：要么调用一次 speak 后再用 finish 静默收尾，要么直接让 finish 念 summary；绝不连续 speak，也不在 speak 后重复同义 summary。行动要求先调用真正办事的工具，不要先口头答应。每次响应最多启动一个持续任务；复合要求等这一步结束再做下一步，不能用后一个任务顶掉前一个。finish 只关闭当前对话轮次，绝不代表行动或任务已经完成。派发了持续任务、目标或导航后就立即 finish 并等待系统通知，此时只能说实际状态，绝不能说“完成了/拿到了/搞定了”。只有系统明确给出任务状态 COMPLETED，且主人完整要求的每一部分都达成，才能说完成；失败要如实说卡在哪里。
+                每个对话轮最多一句有声短话：要么调用一次 speak 后再用 finish 静默收尾，要么直接让 finish 念 summary；绝不连续 speak，也不在 speak 后重复同义 summary。
+
+                对主人要求改变世界的任务，严格按这个阶段执行：
+                1. 启动：本请求的第一个工具必须是直接办事的高层行动工具，例如击杀→smart_combat，采集→gather，挖矿→mine_ore，获得成品→achieve_goal，移动→smart_navigate。不要先口头答应，不要先 scan/inventory/speak。finish 不是“收到”、不是“我去做”、不是任务开始；物理任务开始前绝不调用 finish，也不要把 finish 与启动任务放在同一批工具调用中。
+                2. 等待：行动工具返回 assigned 或任务状态 RUNNING 后，停止调用工具且绝不 finish。任务会继续执行，等待系统随后发来的 COMPLETED 或 FAILED 状态。
+                3. 收尾：只有系统明确给出 COMPLETED 或 FAILED 后才能调用一次 finish。COMPLETED 才能说完成；FAILED 必须如实说没做成。若缺少位置或目标等关键信息，直接用普通文本问一个具体问题，不调用工具。
+
+                每次响应最多启动一个持续任务；复合要求等这一步结束再做下一步，不能用后一个任务顶掉前一个。finish 只关闭当前对话轮次，绝不代表行动或任务已经完成。
 
                 移动只用 smart_navigate，战斗只用 smart_combat；它们会处理绕路、跳跃、普通障碍和安全。成品、工具、盔甲和锭优先 achieve_goal；矿石用 mine_ore；木石等基础材料用 gather。回答“附近有没有/在哪里”之前先 scan_surroundings。空间指代“那里/标记处”使用 use_marker，位置不明就问一句，不要猜。
 

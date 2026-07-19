@@ -619,7 +619,7 @@ public final class ToolRegistry {
             return ok("said");
         });
 
-        register("finish", "Close the current CONVERSATION TURN. If no speak was used this turn, say the factual summary aloud; after a speak it closes silently so the sentence is not repeated. This does NOT mark an action/task complete. For a physical command first dispatch a real action; while RUNNING say only started/ongoing. Claim completion only after system status COMPLETED.", objectSchema()
+        register("finish", "Close a finished CONVERSATION TURN, never start one. FORBIDDEN as the first tool for an owner's physical command: it is not acknowledgement, acceptance, or 'I will do it'. After an action returns assigned/RUNNING, do NOT call finish; wait for the system to report COMPLETED or FAILED. Only then call it once. If no speak was used this turn, it says the verified summary aloud; after speak it closes silently. It never marks an action/task complete by itself.", objectSchema()
                 .property("summary", stringSchema("natural spoken one-line summary of VERIFIED current status, ≤30 Chinese chars"))
                 .required("summary")
                 .build(), (bot, args) -> {
