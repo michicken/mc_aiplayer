@@ -98,6 +98,9 @@ final class FactualityGate {
 
     static SpeechDecision reviewSpeech(Context context, String raw) {
         String speech = raw == null ? "" : raw;
+        if (context.fromOwner() && requiresActionDispatch(context.request()) && context.taskFailed()) {
+            return new SpeechDecision("没做成，刚才那步失败了。", !"没做成，刚才那步失败了。".equals(speech));
+        }
         if (!containsCompletionClaim(speech)) {
             return new SpeechDecision(speech, false);
         }

@@ -49,6 +49,7 @@ public final class CombatTask extends AbstractTask {
     private int lostSightTicks; // 目标连续无视线(被墙挡)的 tick 数
     private int returningTicks;  // 牵引触发后往主人身边走的 tick 数
     private int nextApproachRepathTick;
+    private boolean currentTargetStruck;
 
     public CombatTask(EntityType<?> targetType, int targetKills, float retreatHpThreshold) {
         this(targetType, targetKills, retreatHpThreshold, null, 0.0D);
@@ -125,6 +126,7 @@ public final class CombatTask extends AbstractTask {
 
     private void acquire(AIPlayerEntity bot) {
         target = CombatCore.nearestTarget(bot, targetType, SEARCH_RANGE).orElse(null);
+        currentTargetStruck = false;
         if (target == null) {
             if (kills > 0) {
                 complete();
@@ -138,8 +140,7 @@ public final class CombatTask extends AbstractTask {
 
     private void approach(AIPlayerEntity bot) {
         if (target == null || !target.isAlive()) {
-            kills++;
-            finishOrAcquire();
+            resolveLostTarget(bot);
             return;
         }
         CombatCore.lookAt(bot, target);
@@ -163,8 +164,7 @@ public final class CombatTask extends AbstractTask {
 
     private void ranged(AIPlayerEntity bot) {
         if (target == null || !target.isAlive()) {
-            kills++;
-            finishOrAcquire();
+            resolveLostTarget(bot);
             return;
         }
         if (!shouldUseBow(bot)) {
@@ -185,6 +185,10 @@ public final class CombatTask extends AbstractTask {
         bowChargeTicks++;
         if (bowChargeTicks >= BOW_CHARGE_TICKS) {
             bot.stopUsingItem();
+            // The entity may die after the arrow leaves the bow. Treat the released shot as this
+            // task's concrete combat attempt, rather than later counting a target that vanished
+            // before the bot ever acted.
+            currentTargetStruck = true;
             bowChargeTicks = 0;
             phase = Phase.APPROACH;
         }
@@ -192,8 +196,7 @@ public final class CombatTask extends AbstractTask {
 
     private void strike(AIPlayerEntity bot) {
         if (target == null || !target.isAlive()) {
-            kills++;
-            finishOrAcquire();
+            resolveLostTarget(bot);
             return;
         }
         CombatCore.lookAt(bot, target);
@@ -207,6 +210,7 @@ public final class CombatTask extends AbstractTask {
             return;
         }
         if (CombatCore.strikeIfReady(bot, target)) {
+            currentTargetStruck = true;
             repositionTicks = 8;
             phase = Phase.REPOSITION;
         }
@@ -215,8 +219,7 @@ public final class CombatTask extends AbstractTask {
     private void block(AIPlayerEntity bot) {
         if (target == null || !target.isAlive()) {
             bot.stopUsingItem();
-            kills++;
-            finishOrAcquire();
+            resolveLostTarget(bot);
             return;
         }
         CombatCore.lookAt(bot, target);
@@ -233,8 +236,7 @@ public final class CombatTask extends AbstractTask {
     private void reposition(AIPlayerEntity bot) {
         if (target == null || !target.isAlive()) {
             bot.getActionPack().stopMovement();
-            kills++;
-            finishOrAcquire();
+            resolveLostTarget(bot);
             return;
         }
         CombatCore.lookAt(bot, target);
@@ -288,7 +290,7 @@ public final class CombatTask extends AbstractTask {
     /**
      * 追击牵引一拍:返回 true 表示本 tick 已被牵引逻辑接管(调用方直接 return,不走战斗相位)。
      * 逻辑:未启用牵引 / 主人不在线 → 放行(false)。一旦离主人超过 leashRadius,进入"回撤"模式:
-     * 抛弃当前目标,走回主人身边;回到 leashRadius*0.6 内(或回撤超 100 tick 兜底)即 complete。
+     * 抛弃当前目标,走回主人身边;这不是击杀完成，必须作为失败交回编排层。
      */
     private boolean leashTick(AIPlayerEntity bot) {
         if (leashOwner == null) {
@@ -309,7 +311,7 @@ public final class CombatTask extends AbstractTask {
         double comeBackWithin = leashRadius * 0.6D;
         if (distToOwner <= comeBackWithin || returningTicks > 100) {
             bot.getActionPack().stopMovement();
-            complete(); // 已经回到主人身边(或兜底超时):干净结束,让 follow/guard 等背景任务 resume
+            fail("combat_leash_returned_before_verified_kill");
             return true;
         }
         net.minecraft.util.math.BlockPos ownerPos = owner.getBlockPos();
@@ -369,10 +371,20 @@ public final class CombatTask extends AbstractTask {
 
     private void finishOrAcquire() {
         target = null;
+        currentTargetStruck = false;
         if (kills >= targetKills) {
             complete();
         } else {
             phase = Phase.ACQUIRE;
         }
+    }
+
+    private void resolveLostTarget(AIPlayerEntity bot) {
+        boolean verifiedKill = target != null && !target.isAlive() && currentTargetStruck;
+        bot.stopUsingItem();
+        if (verifiedKill) {
+            kills++;
+        }
+        finishOrAcquire();
     }
 }

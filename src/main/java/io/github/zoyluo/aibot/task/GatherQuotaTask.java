@@ -71,6 +71,9 @@ public final class GatherQuotaTask extends AbstractTask {
     private Phase phase = Phase.SURVEY;
     private BlockPos targetPos;
     private int countSoFar;
+    // A gather request means collect resources now. Inventory from before the request must never
+    // satisfy it, otherwise "cut this tree" finishes instantly when the bot already has logs.
+    private int inventoryBaseline;
     private int countBeforeHarvest;
     private int pickupTicks;
     private int pickupMisses; // 连续"砍了但没捡到掉落物"的次数,超限才判 pickup_timeout(避免一棵没捡到就整个采集失败)
@@ -141,8 +144,12 @@ public final class GatherQuotaTask extends AbstractTask {
 
     @Override
     protected void onStart(AIPlayerEntity bot) {
-        countSoFar = countAccepted(bot);
-        phase = countSoFar >= targetCount ? Phase.DONE : Phase.SURVEY;
+        inventoryBaseline = countAccepted(bot);
+        countSoFar = 0;
+        countBeforeHarvest = 0;
+        selfStuckCount = 0;
+        selfStuckTick = 0;
+        phase = Phase.SURVEY;
         stockpileTask = null;
     }
 
@@ -150,7 +157,7 @@ public final class GatherQuotaTask extends AbstractTask {
     protected void onTick(AIPlayerEntity bot) {
         // 工作记忆:记录走过的轨迹(4 格去抖),roam 选点避开已搜过的区域(不再盲目转圈)。
         EpisodeMemory.INSTANCE.recordTrail(bot.getUuid(), bot.getBlockPos());
-        countSoFar = countAccepted(bot);
+        countSoFar = InventoryDelta.since(countAccepted(bot), inventoryBaseline);
         if (countSoFar >= targetCount) {
             phase = Phase.DONE;
         }
@@ -742,7 +749,7 @@ public final class GatherQuotaTask extends AbstractTask {
 
     private void pickup(AIPlayerEntity bot) {
         HarvestCore.forcePickupNearbyAnyOf(bot, acceptItems);
-        countSoFar = countAccepted(bot);
+        countSoFar = InventoryDelta.since(countAccepted(bot), inventoryBaseline);
         if (countSoFar > countBeforeHarvest) {
             phase = countSoFar >= targetCount ? Phase.DONE : Phase.SURVEY;
             return;
@@ -756,7 +763,7 @@ public final class GatherQuotaTask extends AbstractTask {
                 pickupTicks = 60;
                 return;
             }
-            countSoFar = countAccepted(bot);
+            countSoFar = InventoryDelta.since(countAccepted(bot), inventoryBaseline);
             if (countSoFar > countBeforeHarvest) {
                 pickupMisses = 0;
                 phase = countSoFar >= targetCount ? Phase.DONE : Phase.SURVEY;
@@ -798,7 +805,7 @@ public final class GatherQuotaTask extends AbstractTask {
     }
 
     private void startHarvest(AIPlayerEntity bot) {
-        countBeforeHarvest = countAccepted(bot);
+        countBeforeHarvest = countSoFar;
         pickupSweepAttempted = false;
         HarvestCore.startMining(bot, targetPos);
         phase = Phase.HARVEST;

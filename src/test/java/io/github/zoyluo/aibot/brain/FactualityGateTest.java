@@ -204,4 +204,19 @@ class FactualityGateTest {
                 true, false, false);
         assertTrue(FactualityGate.isUnbackedActionCommitment(onlyWalkedThere, "我现在去砍。"));
     }
+
+    @Test
+    void failedPhysicalWorkCannotCloseWithAnOngoingOrCompletionClaim() {
+        FactualityGate.Context context = new FactualityGate.Context(
+                "把这头驴杀掉", true, true, false, false,
+                true, false, true);
+
+        FactualityGate.FinishDecision decision = FactualityGate.reviewFinish(
+                context, "正在追驴，马上到。"
+        );
+
+        assertTrue(decision.allowed());
+        assertTrue(decision.rewritten());
+        assertEquals("没做成，刚才那步失败了。", decision.speech());
+    }
 }

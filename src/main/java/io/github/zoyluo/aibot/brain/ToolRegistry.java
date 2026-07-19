@@ -702,14 +702,12 @@ public final class ToolRegistry {
                 .property("count", integerSchema("number of kills"))
                 .required("entity_type")
                 .build(), (bot, args) -> {
-            // 追击牵引:有主人时默认拴 16 格——追怪跑出这个半径就放弃、回主人身边。
-            // 直播里 bot 追怪脱离画面是大忌(主人被围/观众看不到),这是"像傻子走来走去"的真凶。
-            java.util.UUID leashOwner = io.github.zoyluo.aibot.manager.AIPlayerManager.INSTANCE.ownerOf(bot).orElse(null);
+            // A direct kill order is authoritative. Returning to the owner before a strike is a
+            // failed task, not a livestream-safe substitute for executing the order.
             Task task = new CombatTask(
                     requiredEntityType(args, "entity_type"),
                     optionalInt(args, "count", 1),
-                    io.github.zoyluo.aibot.AIBotConfig.get().combat().retreatHp(),
-                    leashOwner, 16.0D);
+                    io.github.zoyluo.aibot.AIBotConfig.get().combat().retreatHp());
             TaskManager.INSTANCE.assign(bot, task);
             return ok("assigned: " + task.name());
         });
@@ -2083,9 +2081,8 @@ public final class ToolRegistry {
         Task task;
         switch (mode) {
             case "attack" -> {
-                java.util.UUID leashOwner = AIPlayerManager.INSTANCE.ownerOf(bot).orElse(null);
                 task = new CombatTask(requiredEntityType(args, "entity_type"), optionalInt(args, "count", 1),
-                        AIBotConfig.get().combat().retreatHp(), leashOwner, 16.0D);
+                        AIBotConfig.get().combat().retreatHp());
             }
             case "chase_owner" -> task = ChaseAttackTask.ownerTarget(bot)
                     .orElseThrow(() -> new IllegalArgumentException("no_owner: 这个 bot 没有主人,无法追杀"));
