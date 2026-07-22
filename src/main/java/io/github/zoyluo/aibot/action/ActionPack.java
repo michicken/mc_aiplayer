@@ -197,6 +197,19 @@ public final class ActionPack {
         return ActionResult.IN_PROGRESS;
     }
 
+    /**
+     * Moving-target navigation used by chase. A moving target naturally changes the requested
+     * goal, so the durable failure backoff for one-shot tasks must not turn the pursuit into a
+     * permanent idle state. The caller still rate-limits this method (ChaseAttackTask retries
+     * every few seconds), while the normal startPathTo contract remains unchanged for finite tasks.
+     */
+    public ActionResult startPursuitPathTo(BlockPos goal) {
+        int now = player.getServer().getTicks();
+        clearPathFailure();
+        nextPathfindTick = Math.min(nextPathfindTick, now);
+        return startPathTo(goal);
+    }
+
     /** Emergency movement never stops to mine or tower while a threat is closing in. */
     public ActionResult startEscapePathTo(BlockPos goal) {
         int now = player.getServer().getTicks();

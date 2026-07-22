@@ -717,6 +717,7 @@ public final class ToolRegistry {
             if (task.isEmpty()) {
                 return fail("no_owner: 这个 bot 没有主人,无法追杀");
             }
+            LongRunningIntentManager.INSTANCE.setChaseOwner(bot);
             TaskManager.INSTANCE.assign(bot, task.get());
             return ok("assigned: chase_attack");
         });
@@ -2084,8 +2085,11 @@ public final class ToolRegistry {
                 task = new CombatTask(requiredEntityType(args, "entity_type"), optionalInt(args, "count", 1),
                         AIBotConfig.get().combat().retreatHp());
             }
-            case "chase_owner" -> task = ChaseAttackTask.ownerTarget(bot)
-                    .orElseThrow(() -> new IllegalArgumentException("no_owner: 这个 bot 没有主人,无法追杀"));
+            case "chase_owner" -> {
+                task = ChaseAttackTask.ownerTarget(bot)
+                        .orElseThrow(() -> new IllegalArgumentException("no_owner: 这个 bot 没有主人,无法追杀"));
+                LongRunningIntentManager.INSTANCE.setChaseOwner(bot);
+            }
             case "guard" -> {
                 BlockPos point = optionalBlockPos(args, "x", "y", "z");
                 String playerName = optionalString(args, "player_name", "").trim();

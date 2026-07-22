@@ -3,6 +3,7 @@ package io.github.zoyluo.aibot.task;
 import io.github.zoyluo.aibot.action.EquipAction;
 import io.github.zoyluo.aibot.brain.BrainCoordinator;
 import io.github.zoyluo.aibot.entity.AIPlayerEntity;
+import io.github.zoyluo.aibot.log.BotLog;
 import io.github.zoyluo.aibot.manager.AIPlayerManager;
 import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.util.math.BlockPos;
@@ -64,8 +65,9 @@ public final class ChaseAttackTask extends AbstractTask {
 
     @Override
     public boolean isWaiting() {
-        // 追不到(目标离线 / 爬不上去)时返回 true:StuckWatcher 会跳过本任务,不再 200 tick 判 stuck 中止。
-        return waiting;
+        // 追杀是持久意图,路径施工/目标短暂不可达都是本任务自己的恢复状态。
+        // 交给 StuckWatcher 会把一次寻路卡顿误判成任务失败,随后大脑切换到无关任务。
+        return true;
     }
 
     @Override
@@ -126,12 +128,25 @@ public final class ChaseAttackTask extends AbstractTask {
             lastChasePos = bot.getPos();
             nextRepathTick = elapsed;
         }
+        // 正在垫柱/铺路/挖掘时绝不能因为目标移动几格就 abort 当前施工。
+        // 旧逻辑每 20 tick 看到 targetMoved 就 installPath，施工动作被取消，表现为
+        // “已经搭了一块但不会继续往上搭”。施工完成后下一 tick 再按新位置重规划。
+        boolean constructionBusy = bot.getActionPack().isNavigationWorkingStationary();
         BlockPos activeGoal = bot.getActionPack().activePathGoal();
         boolean targetMoved = activeGoal == null || activeGoal.getSquaredDistance(targetPos) > RETARGET_SHIFT_SQ;
-        if (elapsed >= nextRepathTick && (bot.getActionPack().isPathExecutorIdle() || targetMoved)) {
-            var result = bot.getActionPack().startPathTo(target.getBlockPos());
+        if (!constructionBusy && elapsed >= nextRepathTick
+                && (bot.getActionPack().isPathExecutorIdle() || targetMoved)) {
+            var result = bot.getActionPack().startPursuitPathTo(target.getBlockPos());
             nextRepathTick = elapsed + REPATH_TICKS;
-            if (!result.isFailed()) {
+            if (result.isFailed()) {
+                // 不把一次 A* 超时变成 chase 的完成/失败。ActionPack 自带退避，下一轮
+                // 继续以目标最新坐标重试；等待期间也保持本任务 alive。
+                waiting = true;
+                unreachableTargetPos = targetPos.toImmutable();
+                nextUnreachableRetryTick = elapsed + UNREACHABLE_RETRY_TICKS;
+                BotLog.action(bot, "chase_path_retry",
+                        "reason", result.reason(), "target", targetPos.toShortString());
+            } else {
                 waiting = false;
                 noApproachTicks = 0;
             }
@@ -152,7 +167,7 @@ public final class ChaseAttackTask extends AbstractTask {
             lastDistToTarget = distance;
             lastChasePos = now;
         }
-        if (noApproachTicks >= UNREACHABLE_LIMIT) {
+        if (!constructionBusy && noApproachTicks >= UNREACHABLE_LIMIT) {
             bot.getActionPack().stopAll();
             waiting = true;
             unreachableTargetPos = targetPos.toImmutable();

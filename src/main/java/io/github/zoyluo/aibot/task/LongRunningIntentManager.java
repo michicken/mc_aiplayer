@@ -16,25 +16,62 @@ public final class LongRunningIntentManager {
     private static final int RESTORE_THROTTLE_TICKS = 40;
 
     private final Map<UUID, FollowIntent> followIntents = new ConcurrentHashMap<>();
+    private final Map<UUID, ChaseIntent> chaseIntents = new ConcurrentHashMap<>();
+    private final Map<UUID, Boolean> respawnFollow = new ConcurrentHashMap<>();
+    private final Map<UUID, Boolean> respawnChase = new ConcurrentHashMap<>();
     private final Map<UUID, Integer> nextRestoreTick = new ConcurrentHashMap<>();
 
     private LongRunningIntentManager() {
     }
 
     public void setFollow(AIPlayerEntity bot, String playerName) {
+        chaseIntents.remove(bot.getUuid());
         followIntents.put(bot.getUuid(), new FollowIntent(playerName == null ? "" : playerName.trim()));
         BotLog.task(bot, "long_intent_set", "kind", "follow", "target", playerName == null ? "" : playerName.trim());
     }
 
+    /** Keep owner chase alive across survival interruptions until an explicit owner command clears it. */
+    public void setChaseOwner(AIPlayerEntity bot) {
+        followIntents.remove(bot.getUuid());
+        chaseIntents.put(bot.getUuid(), new ChaseIntent());
+        BotLog.task(bot, "long_intent_set", "kind", "chase_attack", "target", "owner");
+    }
+
     public void clear(AIPlayerEntity bot) {
         followIntents.remove(bot.getUuid());
+        chaseIntents.remove(bot.getUuid());
+        respawnFollow.remove(bot.getUuid());
+        respawnChase.remove(bot.getUuid());
         nextRestoreTick.remove(bot.getUuid());
         BotLog.task(bot, "long_intent_cleared");
     }
 
     public void clear(UUID botId) {
         followIntents.remove(botId);
+        chaseIntents.remove(botId);
+        respawnFollow.remove(botId);
+        respawnChase.remove(botId);
         nextRestoreTick.remove(botId);
+    }
+
+    /** Capture only on the death path; an explicit despawn still clears the intent normally. */
+    public void preserveForRespawn(AIPlayerEntity bot) {
+        UUID id = bot.getUuid();
+        if (followIntents.containsKey(id)) {
+            respawnFollow.put(id, Boolean.TRUE);
+        }
+        if (chaseIntents.containsKey(id)) {
+            respawnChase.put(id, Boolean.TRUE);
+        }
+    }
+
+    public void restoreAfterRespawn(AIPlayerEntity bot) {
+        UUID id = bot.getUuid();
+        if (respawnChase.remove(id) != null) {
+            setChaseOwner(bot);
+        } else if (respawnFollow.remove(id) != null) {
+            setFollow(bot, "");
+        }
     }
 
     /**
@@ -50,8 +87,9 @@ public final class LongRunningIntentManager {
      * 内部 40 tick 节流。
      */
     public void tickIdleRestore(MinecraftServer server, AIPlayerEntity bot) {
+        ChaseIntent chase = chaseIntents.get(bot.getUuid());
         FollowIntent follow = followIntents.get(bot.getUuid());
-        if (follow == null) {
+        if (chase == null && follow == null) {
             return;
         }
         int now = server.getTicks();
@@ -62,6 +100,18 @@ public final class LongRunningIntentManager {
         if (TaskManager.INSTANCE.getActive(bot).isPresent()
                 || TaskManager.INSTANCE.hasPaused(bot)
                 || GoalExecutor.INSTANCE.hasActivePlan(bot)) {
+            return;
+        }
+        if (chase != null) {
+            if (!targetOnline(bot, "")) {
+                return;
+            }
+            Task task = ChaseAttackTask.ownerTarget(bot).orElse(null);
+            if (task == null) {
+                return;
+            }
+            TaskManager.INSTANCE.assign(bot, task);
+            BotLog.task(bot, "long_intent_restored", "name", task.name(), "params", task.describe());
             return;
         }
         if (!targetOnline(bot, follow.playerName())) {
@@ -82,5 +132,8 @@ public final class LongRunningIntentManager {
     }
 
     private record FollowIntent(String playerName) {
+    }
+
+    private record ChaseIntent() {
     }
 }

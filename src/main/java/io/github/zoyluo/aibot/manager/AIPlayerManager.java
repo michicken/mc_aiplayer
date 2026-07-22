@@ -110,6 +110,10 @@ public final class AIPlayerManager {
         io.github.zoyluo.aibot.gift.AudienceControlService.INSTANCE.onBotDeath(bot);
         float yaw = bot.getYaw();
         BlockPos deathPos = bot.getBlockPos();
+        // Death despawns the entity and clears task state. Preserve an explicit long-running
+        // chase/follow intent so the new entity can resume it after the recovery task, instead of
+        // silently becoming idle after a combat death.
+        io.github.zoyluo.aibot.task.LongRunningIntentManager.INSTANCE.preserveForRespawn(bot);
         // 情景记忆:死亡入流(用死亡位置,在移除实体之前记)。蒸馏规则:同区两死 → 危险区。
         io.github.zoyluo.aibot.memory.EpisodeLog.INSTANCE.record(bot,
                 io.github.zoyluo.aibot.memory.EpisodeLog.Type.DEATH, deathPos,
@@ -163,6 +167,7 @@ public final class AIPlayerManager {
             it.remove();
             AIPlayerEntity newBot = fresh.get();
             setRole(newBot, pending.role);
+            io.github.zoyluo.aibot.task.LongRunningIntentManager.INSTANCE.restoreAfterRespawn(newBot);
             io.github.zoyluo.aibot.gift.AudienceControlService.INSTANCE.onBotRespawn(newBot);
             // 重生保护:5s 抗性 V(免疫全部伤害)+回复 II,打破"重生秒死"循环
             newBot.addStatusEffect(new net.minecraft.entity.effect.StatusEffectInstance(

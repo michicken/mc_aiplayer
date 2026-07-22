@@ -271,7 +271,8 @@ public final class TaskManager {
     }
 
     private static boolean isCritical(Task task) {
-        return task instanceof EvadeTask || task instanceof CombatTask || task instanceof EatTask || task instanceof ResupplyTask;
+        return task instanceof EvadeTask || task instanceof CombatTask || task instanceof ChaseAttackTask
+                || task instanceof EatTask || task instanceof ResupplyTask;
     }
 
     public record FailureRecord(String name, String reason, int count, int tick) {
